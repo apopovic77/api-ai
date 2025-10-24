@@ -1,0 +1,17 @@
+{
+  "BACKUP_PREFIX": "arkturian-ai-api",
+  "BUILD_COMMAND": "echo '\u2705 Python API - no build needed'",
+  "DEPLOY_PATH": "/var/www/api-ai.arkturian.com",
+  "DEV_BRANCH": "dev",
+  "INSTALL_DEPS_COMMAND": "pip install -r requirements.txt",
+  "MAIN_BRANCH": "main",
+  "NODE_VERSION": "18",
+  "PROJECT_NAME": "Arkturian AI API",
+  "PROJECT_SLUG": "arkturian-ai-api",
+  "PROJECT_TYPE": "node",
+  "REPO_ROOT": "/Volumes/DatenAP/Code/api-ai",
+  "SITE_URL": "https://api-ai.arkturian.com",
+  "STARTER_PATH": "/Volumes/DatenAP/Code/github-starterpack",
+  "WEB_GROUP": "www-data",
+  "WEB_USER": "www-data"
+}
