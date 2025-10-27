@@ -7,7 +7,7 @@ from pathlib import Path
 from openai import AsyncOpenAI
 import google.generativeai as genai
 from pydantic import BaseModel, Field
-from typing import Literal, List
+from typing import Literal, List, Optional
 # ElevenLabs is imported lazily inside functions to avoid hard dependency at import time
 
 # --- Text Chunking Helper ---
@@ -129,15 +129,15 @@ def create_silence_chunk(duration_ms: int, output_format: str, temp_dir: Path) -
 
 def mix_final_audio(
     dialog_chunks: List[Path],
-    music_path: Path | None,
+    music_path: Optional[Path],
     sfx_tracks: List[dict],
     output_format: str,
-    chunk_kinds: List[str] | None = None,
-    music_delay_ms: int | None = None,
+    chunk_kinds: Optional[List[str]] = None,
+    music_delay_ms: Optional[int] = None,
     enable_ducking: bool = True,
-    request_id: str | None = None,
-    total_dialog_duration_s: float | None = None,
-    music_duration_s: float | None = None,
+    request_id: Optional[str] = None,
+    total_dialog_duration_s: Optional[float] = None,
+    music_duration_s: Optional[float] = None,
     music_loop: bool = True,
     music_stop_at_end: bool = False
 ) -> bytes:

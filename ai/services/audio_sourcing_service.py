@@ -1,11 +1,12 @@
 import os
+from typing import Optional
 try:
     import freesound
 except ModuleNotFoundError:
     freesound = None
 import httpx
 
-async def find_sfx_on_freesound(description: str) -> str | None:
+async def find_sfx_on_freesound(description: str) -> Optional[str]:
     """
     Searches for a sound effect on Freesound.org and returns a download URL.
     """
@@ -27,7 +28,7 @@ async def find_sfx_on_freesound(description: str) -> str | None:
         print(f"--- ERROR [Freesound SFX]: {e}")
         return None
 
-async def find_music_on_freesound(description: str) -> str | None:
+async def find_music_on_freesound(description: str) -> Optional[str]:
     """
     Searches for music on Freesound.org and returns a download URL.
     """

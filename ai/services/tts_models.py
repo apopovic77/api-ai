@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, Optional, Dict
 
 # --- Pydantic Models for TTS Configuration ---
 # Moved here to prevent circular imports
@@ -22,27 +22,27 @@ class TTSContent(BaseModel):
     voice: str = "nova"
     pitch: float = 0.0
     speed: float = 1.0
-    stability: float | None = None
-    clarity: float | None = None
-    style: str | None = None # Add back for robust validation
+    stability: Optional[float] = None
+    clarity: Optional[float] = None
+    style: Optional[str] = None # Add back for robust validation
 
 class TTSConfig(BaseModel):
     provider: str = "openai"
     output_format: str = "mp3"
-    openai: OpenAITTSConfig | None = None
-    elevenlabs: ElevenLabsTTSConfig | None = None
+    openai: Optional[OpenAITTSConfig] = None
+    elevenlabs: Optional[ElevenLabsTTSConfig] = None
     # For dialog generation
-    voice_mapping: dict[str, str] | None = None
+    voice_mapping: Optional[Dict[str, str]] = None
     dialog_mode: bool = False
     ai_gender: Literal['male', 'female'] = 'female'
-    narrator_gender: Literal['male', 'female'] | None = None
-    analysis_user_hint: str | None = None
+    narrator_gender: Optional[Literal['male', 'female']] = None
+    analysis_user_hint: Optional[str] = None
     # Optional: provide a full production plan to skip AI analysis
-    analysis_override: dict | None = None
+    analysis_override: Optional[dict] = None
     generate_title_image: bool = False
     add_sfx: bool = False
     add_music: bool = False
-    manual_music_storage_id: str | None = None
+    manual_music_storage_id: Optional[str] = None
     # Music mixing behavior
     music_loop: bool = True
     music_stop_at_end: bool = False
@@ -54,5 +54,5 @@ class SpeechRequest(BaseModel):
     timestamp: str
     content: TTSContent
     config: TTSConfig
-    save_options: dict | None = {"is_public": False, "owner_email": None}
-    collection_id: str | None = None # New field for dynamic collection name
+    save_options: Optional[dict] = {"is_public": False, "owner_email": None}
+    collection_id: Optional[str] = None # New field for dynamic collection name
