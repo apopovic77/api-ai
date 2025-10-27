@@ -61,7 +61,8 @@ async def claude_endpoint(
     Claude AI endpoint (Anthropic)
 
     Features:
-    - Large context window (200k+ tokens)
+    - Claude 4.5 Sonnet (default) - Best coding & agentic capabilities
+    - Context window: up to 1M tokens (preview)
     - Excellent at reasoning and analysis
     - Strong safety guardrails
     - Vision support (can analyze images)
@@ -113,7 +114,7 @@ async def claude_endpoint(
             content = prompt_text
 
         # Call Claude API
-        model_name = model or "claude-3-5-sonnet-20241022"  # Default to latest Claude 3.5 Sonnet
+        model_name = model or "claude-sonnet-4-5"  # Default to Claude 4.5 Sonnet (latest 2025)
         message = client.messages.create(
             model=model_name,
             max_tokens=prompt.max_tokens or 1000,
@@ -147,7 +148,8 @@ async def chatgpt_endpoint(
     ChatGPT endpoint (OpenAI)
 
     Features:
-    - GPT-4o (latest multimodal model)
+    - GPT-4.1 (default) - Latest 2025 model, best coding & instruction following
+    - Context window: up to 1M tokens
     - Fast response times
     - Vision support (can analyze images)
     - Function calling support
@@ -196,7 +198,7 @@ async def chatgpt_endpoint(
             content = prompt_text
 
         # Call OpenAI API
-        model_name = model or "gpt-4o"  # Default to GPT-4o with vision support
+        model_name = model or "gpt-4.1"  # Default to GPT-4.1 (latest 2025, best performance)
         response = client.chat.completions.create(
             model=model_name,
             messages=[
@@ -230,9 +232,10 @@ async def gemini_endpoint(
     Gemini endpoint (Google)
 
     Features:
-    - Gemini Pro or Ultra
+    - Gemini 2.5 Flash (default) - Stable GA model, fast and cost-effective
+    - Alternative models: gemini-2.5-pro, gemini-2.5-flash-lite
     - Multimodal capabilities (vision support)
-    - Fast and cost-effective
+    - Note: All Gemini 1.x models are retired
 
     Accepts:
     - Simple string prompt: {"prompt": "your text"}
