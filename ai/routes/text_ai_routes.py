@@ -54,6 +54,7 @@ def get_api_key():
 @router.post("/claude", response_model=AIResponse)
 async def claude_endpoint(
     prompt: Prompt,
+    model: Optional[str] = None,
     api_key: str = Depends(get_api_key)
 ):
     """
@@ -112,8 +113,9 @@ async def claude_endpoint(
             content = prompt_text
 
         # Call Claude API
+        model_name = model or "claude-3-5-sonnet-20241022"  # Default to latest Claude 3.5 Sonnet
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",  # Latest Claude 3.5 Sonnet
+            model=model_name,
             max_tokens=prompt.max_tokens or 1000,
             temperature=prompt.temperature or 0.7,
             messages=[
@@ -138,6 +140,7 @@ async def claude_endpoint(
 @router.post("/chatgpt", response_model=AIResponse)
 async def chatgpt_endpoint(
     prompt: Prompt,
+    model: Optional[str] = None,
     api_key: str = Depends(get_api_key)
 ):
     """
@@ -193,8 +196,9 @@ async def chatgpt_endpoint(
             content = prompt_text
 
         # Call OpenAI API
+        model_name = model or "gpt-4o"  # Default to GPT-4o with vision support
         response = client.chat.completions.create(
-            model="gpt-4o",  # GPT-4o with vision support
+            model=model_name,
             messages=[
                 {"role": "user", "content": content}
             ],
@@ -219,6 +223,7 @@ async def chatgpt_endpoint(
 @router.post("/gemini", response_model=AIResponse)
 async def gemini_endpoint(
     prompt: Prompt,
+    model: Optional[str] = None,
     api_key: str = Depends(get_api_key)
 ):
     """
@@ -251,10 +256,13 @@ async def gemini_endpoint(
         prompt_text = ""
         images_data = []
 
+        # Select model
+        model_name = model or 'gemini-2.5-flash'  # Default to Gemini 2.5 Flash
+        gemini_model = genai.GenerativeModel(model_name)
+
         if isinstance(prompt.prompt, str):
             # Simple text prompt
             prompt_text = prompt.prompt
-            model = genai.GenerativeModel('gemini-2.5-flash')
         else:
             # Vision prompt with text + images
             prompt_text = prompt.prompt.text
@@ -269,11 +277,6 @@ async def gemini_endpoint(
                     img = Image.open(io.BytesIO(img_bytes))
                     images_data.append(img)
 
-                # Use vision model (gemini-2.5-flash is multimodal)
-                model = genai.GenerativeModel('gemini-2.5-flash')
-            else:
-                model = genai.GenerativeModel('gemini-2.5-flash')
-
         # Build content parts
         if images_data:
             # Vision request: [text, image1, image2, ...]
@@ -283,11 +286,11 @@ async def gemini_endpoint(
             content_parts = [prompt_text]
 
         # Generate response
-        response = model.generate_content(content_parts)
+        response = gemini_model.generate_content(content_parts)
 
         return AIResponse(
             response=response.text,
-            model="gemini-2.5-flash-vision" if images_data else "gemini-2.5-flash",
+            model=f"{model_name}-vision" if images_data else model_name,
             tokens_used=None,  # Gemini doesn't provide token count directly
             finish_reason="stop"
         )
