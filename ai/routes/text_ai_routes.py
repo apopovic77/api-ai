@@ -58,27 +58,81 @@ async def claude_endpoint(
 ):
     """
     Claude AI endpoint (Anthropic)
-    
+
     Features:
-    - Large context window (100k+ tokens)
+    - Large context window (200k+ tokens)
     - Excellent at reasoning and analysis
     - Strong safety guardrails
+    - Vision support (can analyze images)
     """
     try:
-        # TODO: Implement actual Claude API call
-        # from anthropic import Anthropic
-        # client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        # ...
-        
+        from anthropic import Anthropic
+        import os
+        import base64
+
+        # Configure Anthropic API
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        if not anthropic_key or anthropic_key == "placeholder":
+            raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
+
+        client = Anthropic(api_key=anthropic_key)
+
+        # Extract prompt text and images
+        prompt_text = ""
+        images_data = []
+
+        if isinstance(prompt.prompt, str):
+            # Simple text prompt
+            prompt_text = prompt.prompt
+        else:
+            # Prompt with text + images
+            prompt_text = prompt.prompt.text
+            if prompt.prompt.images:
+                # Decode base64 images
+                for img_b64 in prompt.prompt.images:
+                    # Remove data:image/... prefix if present
+                    if ',' in img_b64:
+                        img_b64 = img_b64.split(',', 1)[1]
+
+                    images_data.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",  # Claude auto-detects format
+                            "data": img_b64
+                        }
+                    })
+
+        # Build messages content
+        if images_data:
+            # Vision request: [text, image1, image2, ...]
+            content = [{"type": "text", "text": prompt_text}] + images_data
+        else:
+            # Text-only request
+            content = prompt_text
+
+        # Call Claude API
+        message = client.messages.create(
+            model="claude-3-5-sonnet-20241022",  # Latest Claude 3.5 Sonnet
+            max_tokens=prompt.max_tokens or 1000,
+            temperature=prompt.temperature or 0.7,
+            messages=[
+                {"role": "user", "content": content}
+            ]
+        )
+
         return AIResponse(
-            response="Claude response - TO BE IMPLEMENTED",
-            model="claude-3-sonnet",
-            tokens_used=0,
-            finish_reason="stop"
+            response=message.content[0].text,
+            model=message.model,
+            tokens_used=message.usage.input_tokens + message.usage.output_tokens,
+            finish_reason=message.stop_reason
         )
     except Exception as e:
-        logger.error(f"Claude error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Claude error: {error_msg}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.post("/chatgpt", response_model=AIResponse)
@@ -88,27 +142,78 @@ async def chatgpt_endpoint(
 ):
     """
     ChatGPT endpoint (OpenAI)
-    
+
     Features:
-    - GPT-4 or GPT-3.5-turbo
+    - GPT-4o (latest multimodal model)
     - Fast response times
+    - Vision support (can analyze images)
     - Function calling support
     """
     try:
-        # TODO: Implement actual OpenAI API call
-        # from openai import OpenAI
-        # client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        # ...
-        
+        from openai import OpenAI
+        import os
+
+        # Configure OpenAI API
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if not openai_key or openai_key == "placeholder":
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+        client = OpenAI(api_key=openai_key)
+
+        # Extract prompt text and images
+        prompt_text = ""
+        images_data = []
+
+        if isinstance(prompt.prompt, str):
+            # Simple text prompt
+            prompt_text = prompt.prompt
+        else:
+            # Prompt with text + images
+            prompt_text = prompt.prompt.text
+            if prompt.prompt.images:
+                # OpenAI expects images in specific format
+                for img_b64 in prompt.prompt.images:
+                    # Keep data:image/... prefix or add it
+                    if not img_b64.startswith('data:image'):
+                        img_b64 = f"data:image/png;base64,{img_b64}"
+
+                    images_data.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": img_b64
+                        }
+                    })
+
+        # Build messages content
+        if images_data:
+            # Vision request: text + images
+            content = [{"type": "text", "text": prompt_text}] + images_data
+        else:
+            # Text-only request
+            content = prompt_text
+
+        # Call OpenAI API
+        response = client.chat.completions.create(
+            model="gpt-4o",  # GPT-4o with vision support
+            messages=[
+                {"role": "user", "content": content}
+            ],
+            max_tokens=prompt.max_tokens or 1000,
+            temperature=prompt.temperature or 0.7
+        )
+
         return AIResponse(
-            response="ChatGPT response - TO BE IMPLEMENTED",
-            model="gpt-4",
-            tokens_used=0,
-            finish_reason="stop"
+            response=response.choices[0].message.content,
+            model=response.model,
+            tokens_used=response.usage.total_tokens,
+            finish_reason=response.choices[0].finish_reason
         )
     except Exception as e:
-        logger.error(f"ChatGPT error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"ChatGPT error: {error_msg}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.post("/gemini", response_model=AIResponse)
