@@ -732,22 +732,22 @@ class AudioDramaGenerator(SpeechGenerator):
         #     )
         #     return sfx_obj
         # except HTTPException as he:
-            # Gracefully skip silent or invalid SFX prompts
-            print(f"--- Audio Drama: Skipping SFX due to HTTPException {he.status_code}: {he.detail}")
-            try:
-                from ai.routes.dialog_routes import set_dialog_status
-                set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(he.detail))
-            except Exception:
-                pass
-            return None
-        except Exception as e:
-            print(f"--- Audio Drama: Skipping SFX due to unexpected error: {e}")
-            try:
-                from ai.routes.dialog_routes import set_dialog_status
-                set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(e))
-            except Exception:
-                pass
-            return None
+        #     # Gracefully skip silent or invalid SFX prompts
+        #     print(f"--- Audio Drama: Skipping SFX due to HTTPException {he.status_code}: {he.detail}")
+        #     try:
+        #         from ai.routes.dialog_routes import set_dialog_status
+        #         set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(he.detail))
+        #     except Exception:
+        #         pass
+        #     return None
+        # except Exception as e:
+        #     print(f"--- Audio Drama: Skipping SFX due to unexpected error: {e}")
+        #     try:
+        #         from ai.routes.dialog_routes import set_dialog_status
+        #         set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(e))
+        #     except Exception:
+        #         pass
+        #     return None
 
     async def _source_music(self, music_cues):
         # Music generation not implemented yet
