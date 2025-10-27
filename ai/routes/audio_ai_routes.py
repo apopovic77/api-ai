@@ -28,6 +28,7 @@ from ai.services.tts_models import SpeechRequest
 from ai.services.speech_service import SpeechGenerator
 from ai.services.audio_drama_service import AudioDramaGenerator
 from ai.clients.storage_client import StorageObject
+from ai.routes.music_generation import generate_music_stable_audio, generate_music_elevenlabs
 
 
 # Response Models
@@ -257,25 +258,27 @@ async def generate_music_endpoint(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Generate music from text prompt (Suno)
-    
+    Generate music from text prompt using Stable Audio (AIMLAPI)
+
     Examples:
     - "upbeat electronic dance music"
     - "calm piano melody"
     - "epic orchestral soundtrack"
     """
     try:
-        # TODO: Implement music generation with Suno
-        # This might be async/job-based like in old API
-        
+        duration_ms = request.duration * 1000  # Convert seconds to milliseconds
+        result = await generate_music_stable_audio(request.prompt, duration_ms)
+
         return AudioResponse(
-            audio_url="https://placeholder.com/music.mp3",
-            storage_object_id=None,
+            audio_url=result["audio_url"],
+            storage_object_id=result["storage_object_id"],
             duration_seconds=float(request.duration),
-            format="mp3"
+            format=result["format"]
         )
     except Exception as e:
         logger.error(f"Music generation error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -286,22 +289,26 @@ async def generate_music_eleven_endpoint(
 ):
     """
     Generate music using ElevenLabs
-    
+
     Features:
     - High quality music generation
     - Style control
     - Instrumental and vocal options
+    - Auto-retry with suggested prompt if flagged
     """
     try:
-        # TODO: Implement ElevenLabs music generation
-        
+        duration_ms = request.duration * 1000  # Convert seconds to milliseconds
+        result = await generate_music_elevenlabs(request.prompt, duration_ms)
+
         return AudioResponse(
-            audio_url="https://placeholder.com/music_eleven.mp3",
-            storage_object_id=None,
+            audio_url=result["audio_url"],
+            storage_object_id=result["storage_object_id"],
             duration_seconds=float(request.duration),
-            format="mp3"
+            format=result["format"]
         )
     except Exception as e:
         logger.error(f"ElevenLabs music error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
