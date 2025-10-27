@@ -186,7 +186,7 @@ def mix_final_audio(
             # Emit status for observability
             if request_id:
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(request_id, phase="mix", subphase="concat_fast")
                 except Exception:
                     pass
@@ -202,7 +202,7 @@ def mix_final_audio(
             subprocess.run(demux_cmd, check=True, capture_output=True, text=True)
             if request_id:
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(request_id, phase="mix", subphase="concat_fast_done")
                 except Exception:
                     pass
@@ -216,7 +216,7 @@ def mix_final_audio(
             print(f"--- FFMPEG ERROR: concat demuxer path failed. STDERR:\n{e.stderr}")
             if request_id:
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(request_id, phase="mix", subphase="concat_fast_error", error=e.stderr[-400:])
                 except Exception:
                     pass
@@ -351,14 +351,14 @@ def mix_final_audio(
         # Emit debug status for mix graph
         if request_id:
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(request_id, phase="mix", subphase="graph", inputs=len(dialog_chunks), music=bool(music_path), delay_ms=int(music_delay_ms or 0), ducking=bool(enable_ducking))
             except Exception:
                 pass
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         if request_id:
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(request_id, phase="mix", subphase="ffmpeg_done")
             except Exception:
                 pass
@@ -367,7 +367,7 @@ def mix_final_audio(
         print(f"--- FFMPEG ERROR: Crossfade mix failed, falling back to simple concat. STDERR:\n{e.stderr}")
         if request_id:
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(request_id, phase="mix", subphase="ffmpeg_error", error=e.stderr[-400:])
             except Exception:
                 pass
@@ -421,14 +421,14 @@ def mix_final_audio(
             ]
             if request_id:
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(request_id, phase="mix", subphase="fallback_start")
                 except Exception:
                     pass
             subprocess.run(fallback_cmd, check=True, capture_output=True, text=True)
             if request_id:
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(request_id, phase="mix", subphase="fallback_done")
                 except Exception:
                     pass

@@ -99,14 +99,14 @@ class AudioDramaGenerator(SpeechGenerator):
         if isinstance(override, dict) and override.get('production_cues') is not None:
             print(f"DIALOG[{self.request.id}]: Using analysis_override from request (skipping Gemini)")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="analyze", subphase="override_used")
             except Exception:
                 pass
             return override
         print(f"DIALOG[{self.request.id}]: Analyzing script with Gemini…")
         try:
-            from main import set_dialog_status
+            from ai.routes.dialog_routes import set_dialog_status
             set_dialog_status(self.request.id, phase="analyze", subphase="start")
         except Exception:
             pass
@@ -160,14 +160,14 @@ class AudioDramaGenerator(SpeechGenerator):
             response = await asyncio.to_thread(model.generate_content, analysis_prompt)
             print(f"DIALOG[{self.request.id}]: Gemini responded in {int((time.time()-t_start)*1000)}ms")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="analyze", subphase="gemini_done", duration_ms=int((time.time()-t_start)*1000))
             except Exception:
                 pass
         except Exception as e:
             print(f"DIALOG[{self.request.id}][ERROR]: Gemini call failed after {int((time.time()-t_start)*1000)}ms -> {e}")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="analyze", subphase="gemini_error", error=str(e))
             except Exception:
                 pass
@@ -194,7 +194,7 @@ class AudioDramaGenerator(SpeechGenerator):
                         insert_idx = 0
                         result['production_cues'] = cues[:insert_idx] + [default_sfx] + cues[insert_idx:]
                         try:
-                            from main import set_dialog_status
+                            from ai.routes.dialog_routes import set_dialog_status
                             set_dialog_status(self.request.id, phase="analyze", subphase="sfx_injected", reason="none_from_ai")
                         except Exception:
                             pass
@@ -202,7 +202,7 @@ class AudioDramaGenerator(SpeechGenerator):
                     pass
             # Emit counts for observability
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 cues = result.get('production_cues', [])
                 sfx_count = sum(1 for c in cues if (c.get('type') or '').lower() == 'sfx')
                 set_dialog_status(self.request.id, phase="analyze", subphase="parsed", cues=len(cues), sfx_count=int(sfx_count))
@@ -210,7 +210,7 @@ class AudioDramaGenerator(SpeechGenerator):
                 pass
             print(f"DIALOG[{self.request.id}]: Parsed analysis ok in {int((time.time()-t_start)*1000)}ms; cues={len(result.get('production_cues', []))}")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="analyze", subphase="parsed", cues=len(result.get('production_cues', [])))
             except Exception:
                 pass
@@ -218,7 +218,7 @@ class AudioDramaGenerator(SpeechGenerator):
         except (json.JSONDecodeError, ValueError) as e:
             print(f"DIALOG[{self.request.id}][ERROR]: Failed to parse Gemini response: {e}")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="analyze", subphase="parse_error", error=str(e))
             except Exception:
                 pass
@@ -237,7 +237,7 @@ class AudioDramaGenerator(SpeechGenerator):
         # Generate/Source all audio chunks based on the production cues
         print(f"DIALOG[{self.request.id}]: Producing audio for {len(production_cues)} cues; music_requested={self.request.config.add_music}")
         try:
-            from main import set_dialog_status
+            from ai.routes.dialog_routes import set_dialog_status
             set_dialog_status(self.request.id, phase="generate", subphase="start", total_cues=len(production_cues), music=self.request.config.add_music)
         except Exception:
             pass
@@ -292,7 +292,7 @@ class AudioDramaGenerator(SpeechGenerator):
                     sequence_meta.append({"type":"silence","duration_ms":after_ms,"reason":"pause_after"})
                 print(f"DIALOG[{self.request.id}]: Dialog chunk ready in {int((time.time()-t_seg)*1000)}ms")
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(
                         self.request.id,
                         phase="generate",
@@ -306,7 +306,7 @@ class AudioDramaGenerator(SpeechGenerator):
                     pass
             elif cue.get('type') == 'sfx':
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(self.request.id, phase="generate", subphase="sfx_start", description=cue.get('description'))
                 except Exception:
                     pass
@@ -327,7 +327,7 @@ class AudioDramaGenerator(SpeechGenerator):
                         "storage_object_id": getattr(sfx_storage_obj, 'id', None)
                     })
                     try:
-                        from main import set_dialog_status
+                        from ai.routes.dialog_routes import set_dialog_status
                         set_dialog_status(self.request.id, phase="generate", subphase="sfx_done", sfx_id=getattr(sfx_storage_obj,'id',None))
                     except Exception:
                         pass
@@ -340,7 +340,7 @@ class AudioDramaGenerator(SpeechGenerator):
         manual_id = getattr(self.request.config, 'manual_music_storage_id', None)
         if manual_id and not getattr(self.request.config, 'add_music', False):
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="generate", subphase="music_manual_flag_fix")
             except Exception:
                 pass
@@ -351,7 +351,7 @@ class AudioDramaGenerator(SpeechGenerator):
                 try:
                     print(f"--- Audio Drama: Using manual music storage id {manual_id}...")
                     try:
-                        from main import set_dialog_status
+                        from ai.routes.dialog_routes import set_dialog_status
                         set_dialog_status(self.request.id, phase="generate", subphase="music_manual", storage_id=str(manual_id))
                     except Exception:
                         pass
@@ -373,7 +373,7 @@ class AudioDramaGenerator(SpeechGenerator):
                             try:
                                 hr = await client.head(obj.file_url, follow_redirects=True)
                                 try:
-                                    from main import set_dialog_status
+                                    from ai.routes.dialog_routes import set_dialog_status
                                     set_dialog_status(self.request.id, phase="generate", subphase="music_manual_head", status_code=hr.status_code, content_type=hr.headers.get('content-type'), content_length=int(hr.headers.get('content-length') or -1))
                                 except Exception:
                                     pass
@@ -402,7 +402,7 @@ class AudioDramaGenerator(SpeechGenerator):
                             subprocess.run(cmd, check=True, capture_output=True, text=True)
                             music_path = combined
                             try:
-                                from main import set_dialog_status
+                                from ai.routes.dialog_routes import set_dialog_status
                                 set_dialog_status(self.request.id, phase="generate", subphase="music_manual_multi_done", count=len(downloaded_paths))
                             except Exception:
                                 pass
@@ -426,14 +426,14 @@ class AudioDramaGenerator(SpeechGenerator):
                             return 0.0
                     try:
                         dur = _probe_dur(music_path)
-                        from main import set_dialog_status
+                        from ai.routes.dialog_routes import set_dialog_status
                         set_dialog_status(self.request.id, phase="generate", subphase="music_manual_downloaded", bytes=int(music_path.stat().st_size), duration_s=round(dur,3))
                     except Exception:
                         pass
                 except Exception as e:
                     print(f"--- Audio Drama: Failed to use manual music id {manual_id}: {e}. Falling back to generated music if available.")
                     try:
-                        from main import set_dialog_status
+                        from ai.routes.dialog_routes import set_dialog_status
                         set_dialog_status(self.request.id, phase="generate", subphase="music_manual_error", error=str(e))
                     except Exception:
                         pass
@@ -442,7 +442,7 @@ class AudioDramaGenerator(SpeechGenerator):
             if music_path is None:
                 if music_cues and isinstance(music_cues, list) and len(music_cues) > 0 and music_cues[0].get('description'):
                     try:
-                        from main import set_dialog_status
+                        from ai.routes.dialog_routes import set_dialog_status
                         set_dialog_status(self.request.id, phase="generate", subphase="music_start", description=music_cues[0].get('description'))
                     except Exception:
                         pass
@@ -455,7 +455,7 @@ class AudioDramaGenerator(SpeechGenerator):
                         'time': 'full_duration'
                     }]
                     try:
-                        from main import set_dialog_status
+                        from ai.routes.dialog_routes import set_dialog_status
                         set_dialog_status(self.request.id, phase="generate", subphase="music_start", description=fallback_cue[0]['description'])
                     except Exception:
                         pass
@@ -512,7 +512,7 @@ class AudioDramaGenerator(SpeechGenerator):
                     final_sequence_kinds.insert(0, 'silence')
                     sequence_meta.insert(0, {"type":"silence","duration_ms":add_ms, "reason":"intro_align"})
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(self.request.id, phase="generate", subphase="intro_align", leading_silence_ms=int(leading_silence_s*1000), add_ms=int(add_ms))
                 except Exception:
                     pass
@@ -521,7 +521,7 @@ class AudioDramaGenerator(SpeechGenerator):
 
         print(f"DIALOG[{self.request.id}]: Timeline build & mix starting…")
         try:
-            from main import set_dialog_status
+            from ai.routes.dialog_routes import set_dialog_status
             set_dialog_status(self.request.id, phase="mix", subphase="start")
         except Exception:
             pass
@@ -591,7 +591,7 @@ class AudioDramaGenerator(SpeechGenerator):
         production_plan['mix_timeline'] = mix_timeline
         # register temp dialog/sfx/music chunks for UI preview
         try:
-            from main import register_temp_dialog_chunks
+            from ai.routes.dialog_routes import register_temp_dialog_chunks
             registry = []
             for i in range(len(final_sequence_paths)):
                 kind = final_sequence_kinds[i]
@@ -634,20 +634,20 @@ class AudioDramaGenerator(SpeechGenerator):
             ), timeout=45)
         except asyncio.TimeoutError:
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="mix", subphase="error", error="mix_timeout")
             except Exception:
                 pass
             raise HTTPException(status_code=504, detail="Mixing timed out")
         except Exception as e:
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="mix", subphase="error", error=str(e))
             except Exception:
                 pass
             raise
         try:
-            from main import set_dialog_status
+            from ai.routes.dialog_routes import set_dialog_status
             set_dialog_status(self.request.id, phase="mix", subphase="done")
         except Exception:
             pass
@@ -710,7 +710,7 @@ class AudioDramaGenerator(SpeechGenerator):
         return chunk_path
 
     async def _source_single_sfx(self, cue):
-        from main import generate_sfx_endpoint, AudioGenRequest
+        # SFX generation not implemented yet
         description = cue.get('description', '')
         if not description:
             return None
@@ -727,7 +727,7 @@ class AudioDramaGenerator(SpeechGenerator):
             # Gracefully skip silent or invalid SFX prompts
             print(f"--- Audio Drama: Skipping SFX due to HTTPException {he.status_code}: {he.detail}")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(he.detail))
             except Exception:
                 pass
@@ -735,14 +735,14 @@ class AudioDramaGenerator(SpeechGenerator):
         except Exception as e:
             print(f"--- Audio Drama: Skipping SFX due to unexpected error: {e}")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(e))
             except Exception:
                 pass
             return None
 
     async def _source_music(self, music_cues):
-        from main import generate_music_endpoint, generate_music_eleven_endpoint, AudioGenRequest
+        # Music generation not implemented yet
         if not music_cues:
             return None
         cue = music_cues[0] if isinstance(music_cues, list) else {}
@@ -762,7 +762,7 @@ class AudioDramaGenerator(SpeechGenerator):
         # 1) ElevenLabs
         try:
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="generate", subphase="music_provider_eleven_start")
             except Exception:
                 pass
@@ -773,7 +773,7 @@ class AudioDramaGenerator(SpeechGenerator):
             )
             if music_obj:
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(self.request.id, phase="generate", subphase="music_provider_eleven_done")
                 except Exception:
                     pass
@@ -781,7 +781,7 @@ class AudioDramaGenerator(SpeechGenerator):
         except Exception as e:
             print(f"--- Audio Drama: ElevenLabs music failed: {e}")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="generate", subphase="music_provider_eleven_error", error=str(e))
             except Exception:
                 pass
@@ -789,7 +789,7 @@ class AudioDramaGenerator(SpeechGenerator):
         # 2) Stable Audio via AIMLAPI
         try:
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="generate", subphase="music_provider_aiml_start")
             except Exception:
                 pass
@@ -800,7 +800,7 @@ class AudioDramaGenerator(SpeechGenerator):
             )
             if music_obj:
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(self.request.id, phase="generate", subphase="music_provider_aiml_done")
                 except Exception:
                     pass
@@ -808,7 +808,7 @@ class AudioDramaGenerator(SpeechGenerator):
         except Exception as e:
             print(f"--- Audio Drama: Stable Audio (AIMLAPI) failed: {e}")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="generate", subphase="music_provider_aiml_error", error=str(e))
             except Exception:
                 pass
@@ -816,7 +816,7 @@ class AudioDramaGenerator(SpeechGenerator):
         # 3) Free-sourced fallback (Pixabay/Freesound)
         try:
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="generate", subphase="music_provider_fallback_start")
             except Exception:
                 pass
@@ -829,7 +829,7 @@ class AudioDramaGenerator(SpeechGenerator):
                 music_path.write_bytes(r.content)
                 print(f"--- Audio Drama: Downloaded fallback music to {music_path}")
                 try:
-                    from main import set_dialog_status
+                    from ai.routes.dialog_routes import set_dialog_status
                     set_dialog_status(self.request.id, phase="generate", subphase="music_provider_fallback_done")
                 except Exception:
                     pass
@@ -837,7 +837,7 @@ class AudioDramaGenerator(SpeechGenerator):
         except Exception as e:
             print(f"--- Audio Drama: Fallback free-sourced music failed: {e}")
             try:
-                from main import set_dialog_status
+                from ai.routes.dialog_routes import set_dialog_status
                 set_dialog_status(self.request.id, phase="generate", subphase="music_provider_fallback_error", error=str(e))
             except Exception:
                 pass

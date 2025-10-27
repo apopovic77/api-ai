@@ -9,7 +9,7 @@ import google.generativeai as genai
 import tts_service
 import audio_sourcing_service
 from tts_models import SpeechRequest, OpenAITTSConfig
-from main import ImageGenRequest, generate_image_endpoint # Allow internal calls
+# Image generation endpoint integration TODO # Allow internal calls
 
 # Load prompts at startup
 PROMPTS = {}
