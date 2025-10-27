@@ -214,6 +214,23 @@ class AudioDramaGenerator(SpeechGenerator):
                 set_dialog_status(self.request.id, phase="analyze", subphase="parsed", cues=len(result.get('production_cues', [])))
             except Exception:
                 pass
+
+            # If manual music is selected, add it to the analysis result for UI display
+            manual_music_id = getattr(self.request.config, 'manual_music_storage_id', None)
+            if manual_music_id:
+                # Add manual music info to the music array
+                if 'music' not in result or not result['music']:
+                    result['music'] = []
+                result['music'].append({
+                    "type": "manual",
+                    "storage_id": manual_music_id,
+                    "description": f"Manual music selection (Storage ID: {manual_music_id})",
+                    "length_ms": 30000,  # Default, will be adjusted based on actual file
+                    "start_offset_ms": 0,
+                    "intro_pause_ms": 1000
+                })
+                print(f"DIALOG[{self.request.id}]: Added manual music ID {manual_music_id} to analysis result")
+
             return result
         except (json.JSONDecodeError, ValueError) as e:
             print(f"DIALOG[{self.request.id}][ERROR]: Failed to parse Gemini response: {e}")
