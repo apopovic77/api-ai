@@ -149,7 +149,7 @@ async def gemini_endpoint(
         if isinstance(prompt.prompt, str):
             # Simple text prompt
             prompt_text = prompt.prompt
-            model = genai.GenerativeModel('gemini-pro')
+            model = genai.GenerativeModel('gemini-1.5-flash')
         else:
             # Vision prompt with text + images
             prompt_text = prompt.prompt.text
@@ -164,10 +164,10 @@ async def gemini_endpoint(
                     img = Image.open(io.BytesIO(img_bytes))
                     images_data.append(img)
 
-                # Use vision model
-                model = genai.GenerativeModel('gemini-pro-vision')
+                # Use vision model (gemini-1.5-flash is multimodal)
+                model = genai.GenerativeModel('gemini-1.5-flash')
             else:
-                model = genai.GenerativeModel('gemini-pro')
+                model = genai.GenerativeModel('gemini-1.5-flash')
 
         # Build content parts
         if images_data:
@@ -182,7 +182,7 @@ async def gemini_endpoint(
 
         return AIResponse(
             response=response.text,
-            model="gemini-pro-vision" if images_data else "gemini-pro",
+            model="gemini-1.5-flash-vision" if images_data else "gemini-1.5-flash",
             tokens_used=None,  # Gemini doesn't provide token count directly
             finish_reason="stop"
         )
