@@ -136,9 +136,9 @@ async def gemini_endpoint(
         import io
 
         # Configure Gemini API
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if not gemini_key:
-            raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
+        gemini_key = os.getenv("GOOGLE_API_KEY")
+        if not gemini_key or gemini_key == "placeholder":
+            raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured")
 
         genai.configure(api_key=gemini_key)
 
