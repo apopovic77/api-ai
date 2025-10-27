@@ -62,6 +62,7 @@ class SpeechGenerator:
         return None
 
     async def generate_title_image(self):
+        """Generate a title image for the audio using Gemini 2.0 Flash (Imagen 3)"""
         print("--- Image Gen: Requesting title image prompt from Gemini...")
 
         image_prompt_request = (
@@ -77,13 +78,41 @@ class SpeechGenerator:
 
         print(f"--- Image Gen: Received prompt: '{image_prompt}'")
 
-        # Ensure image uses same collection as audio; default to ai_hörbuch for dialog
-        image_collection = getattr(self.request, 'collection_id', None) or "ai_hörbuch"
+        # Generate image using the prompt
+        try:
+            from ai.routes.image_ai_routes import ImageGenRequest, generate_image_endpoint
 
-        # Note: image_gen_endpoint needs to be passed as a parameter
-        # For now, return None as image generation is optional
-        # TODO: Implement image generation endpoint integration
-        return None
+            # Ensure image uses same collection as audio
+            collection_id = getattr(self.request, 'collection_id', None) or "ai_hörbuch"
+
+            # Create image request with collection and link info
+            img_request = ImageGenRequest(prompt=image_prompt)
+            img_request.collection_id = collection_id
+            img_request.link_id = self.request.id
+
+            # Generate and save image
+            result = await generate_image_endpoint(img_request, self.api_key)
+
+            print(f"--- Image Gen: Successfully generated image (ID: {result.get('id')})")
+
+            # Convert to StorageObject-like response
+            from ai.clients.storage_client import StorageObject
+            return StorageObject(
+                id=result['id'],
+                file_url=result['file_url'],
+                object_key=f"img_{result['id']}",
+                original_filename=f"img_{self.request.id}.png",
+                mime_type="image/png",
+                file_size=0,
+                context="image-generation",
+                is_public=True,
+                collection_id=collection_id
+            )
+        except Exception as e:
+            print(f"--- Image Gen: Failed to generate image: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     async def _save_audio(self, audio_bytes: bytes):
         save_opts = self.request.save_options or {}

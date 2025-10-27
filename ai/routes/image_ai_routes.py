@@ -51,36 +51,88 @@ def get_api_key():
     return "placeholder"
 
 
-@router.post("/genimage", response_model=ImageResponse)
+@router.post("/genimage")
 async def generate_image_endpoint(
     request: ImageGenRequest,
     api_key: str = Depends(get_api_key)
 ):
     """
-    Generate an image from text prompt
-    
-    Supports:
-    - DALL-E 3 (OpenAI)
-    - Flux Dev/Pro (Replicate)
-    - Stable Diffusion models
+    Generate an image from text prompt using Gemini 2.5 Flash (Imagen 3)
+
+    Uses Google's Imagen 3 (Nano Banana) via Gemini API for high-quality image generation
     """
     try:
-        # TODO: Implement actual image generation
-        # 1. Call image model API (OpenAI/Replicate)
-        # 2. Download generated image
-        # 3. Upload to Storage API
-        # 4. Return storage object info
-        
-        return ImageResponse(
-            image_url="https://placeholder.com/image.jpg",
-            storage_object_id=None,
-            model=request.model,
-            width=request.width,
-            height=request.height
+        import google.generativeai as genai
+        import os
+        import uuid
+        from ai.clients.storage_client import save_file_and_record
+
+        print(f"--- Image Gen: Generating image with Gemini 2.5 Flash (Imagen 3) for prompt: '{request.prompt[:80]}...'")
+
+        # Configure Gemini API
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+        # Use Gemini 2.5 Flash with image generation capability (Imagen 3 - Nano Banana)
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+
+        # Generate image
+        response = await model.generate_content_async(
+            [request.prompt],
+            generation_config=genai.GenerationConfig(
+                response_modalities=["image"]
+            )
         )
+
+        # Extract image from response
+        if not response.candidates or not response.candidates[0].content.parts:
+            raise HTTPException(status_code=500, detail="Gemini image generation returned no data.")
+
+        # Find the image part
+        image_part = None
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, 'inline_data') and part.inline_data:
+                image_part = part
+                break
+
+        if not image_part:
+            raise HTTPException(status_code=500, detail="No image found in Gemini response.")
+
+        # Get image bytes
+        image_bytes = image_part.inline_data.data
+
+        # Generate filename
+        filename = f"img_{str(uuid.uuid4())[:8]}.png"
+
+        # Save to storage
+        collection_id = getattr(request, 'collection_id', None) or "ai-generated-images"
+        link_id = getattr(request, 'link_id', None)
+
+        saved_obj = await save_file_and_record(
+            data=image_bytes,
+            original_filename=filename,
+            context="image-generation",
+            is_public=True,
+            collection_id=collection_id,
+            link_id=link_id
+        )
+
+        print(f"--- Image Gen: Saved image to storage object ID {saved_obj.id}")
+
+        return {
+            "id": saved_obj.id,
+            "image_url": saved_obj.file_url,
+            "file_url": saved_obj.file_url,
+            "storage_object_id": saved_obj.id,
+            "model": "gemini-2.0-flash-exp-imagen3",
+            "width": request.width,
+            "height": request.height
+        }
+
     except Exception as e:
         logger.error(f"Image generation error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An error occurred during image generation: {str(e)}")
 
 
 @router.post("/upscale", response_model=ImageResponse)
