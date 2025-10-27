@@ -10,7 +10,7 @@ Endpoints for text-based AI models:
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,8 +18,13 @@ router = APIRouter()
 
 
 # Request/Response Models
+class PromptText(BaseModel):
+    """Nested text/images structure for legacy compatibility"""
+    text: str
+    images: Optional[List[str]] = None  # Base64 encoded images
+
 class Prompt(BaseModel):
-    prompt: str
+    prompt: Union[str, PromptText]  # Support both string and nested object
     system: Optional[str] = None
     max_tokens: Optional[int] = 1000
     temperature: Optional[float] = 0.7
@@ -28,9 +33,16 @@ class Prompt(BaseModel):
 
 class AIResponse(BaseModel):
     response: str
+    message: Optional[str] = None  # Alias for 'response' for legacy compatibility
     model: str
     tokens_used: Optional[int] = None
     finish_reason: Optional[str] = None
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Auto-populate message field from response if not provided
+        if not self.message and self.response:
+            self.message = self.response
 
 
 # Placeholder for API key validation
@@ -106,22 +118,72 @@ async def gemini_endpoint(
 ):
     """
     Gemini endpoint (Google)
-    
+
     Features:
     - Gemini Pro or Ultra
-    - Multimodal capabilities
+    - Multimodal capabilities (vision support)
     - Fast and cost-effective
+
+    Accepts:
+    - Simple string prompt: {"prompt": "your text"}
+    - Vision prompt: {"prompt": {"text": "describe this", "images": ["base64..."]}}
     """
     try:
-        # TODO: Implement actual Gemini API call
-        # import google.generativeai as genai
-        # genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        # ...
-        
+        import google.generativeai as genai
+        import os
+        import base64
+        from PIL import Image
+        import io
+
+        # Configure Gemini API
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key:
+            raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
+
+        genai.configure(api_key=gemini_key)
+
+        # Extract prompt text and images
+        prompt_text = ""
+        images_data = []
+
+        if isinstance(prompt.prompt, str):
+            # Simple text prompt
+            prompt_text = prompt.prompt
+            model = genai.GenerativeModel('gemini-pro')
+        else:
+            # Vision prompt with text + images
+            prompt_text = prompt.prompt.text
+            if prompt.prompt.images:
+                # Decode base64 images
+                for img_b64 in prompt.prompt.images:
+                    # Remove data:image/... prefix if present
+                    if ',' in img_b64:
+                        img_b64 = img_b64.split(',', 1)[1]
+
+                    img_bytes = base64.b64decode(img_b64)
+                    img = Image.open(io.BytesIO(img_bytes))
+                    images_data.append(img)
+
+                # Use vision model
+                model = genai.GenerativeModel('gemini-pro-vision')
+            else:
+                model = genai.GenerativeModel('gemini-pro')
+
+        # Build content parts
+        if images_data:
+            # Vision request: [text, image1, image2, ...]
+            content_parts = [prompt_text] + images_data
+        else:
+            # Text-only request
+            content_parts = [prompt_text]
+
+        # Generate response
+        response = model.generate_content(content_parts)
+
         return AIResponse(
-            response="Gemini response - TO BE IMPLEMENTED",
-            model="gemini-pro",
-            tokens_used=0,
+            response=response.text,
+            model="gemini-pro-vision" if images_data else "gemini-pro",
+            tokens_used=None,  # Gemini doesn't provide token count directly
             finish_reason="stop"
         )
     except Exception as e:
