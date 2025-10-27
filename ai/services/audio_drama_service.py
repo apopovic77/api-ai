@@ -6,12 +6,12 @@ import httpx
 from fastapi import HTTPException
 import google.generativeai as genai
 
-from speech_service import SpeechGenerator
+from ai.services.speech_service import SpeechGenerator
 import time
-import tts_service
-import audio_sourcing_service
+from ai.services import tts_service
+from ai.services import audio_sourcing_service
 
-from tts_models import SpeechRequest
+from ai.services.tts_models import SpeechRequest
 
 from fastapi.encoders import jsonable_encoder
 import asyncio
