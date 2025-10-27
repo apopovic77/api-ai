@@ -355,23 +355,34 @@ class AudioDramaGenerator(SpeechGenerator):
                         set_dialog_status(self.request.id, phase="generate", subphase="music_manual", storage_id=str(manual_id))
                     except Exception:
                         pass
-                    from artrack.models import StorageObject
-                    from artrack.config import settings as _settings
-                    from pathlib import Path as _Path
-                    import httpx as _httpx
-                    import json as _json
                     import os as _os
                     # Support multiple IDs separated by semicolons
                     id_list = [s.strip() for s in str(manual_id).split(';') if s.strip()]
                     downloaded_paths: list[Path] = []
-                    async with _httpx.AsyncClient() as client:
+
+                    # Fetch storage objects via HTTP Storage API
+                    STORAGE_API_URL = _os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
+                    STORAGE_API_KEY = _os.getenv("STORAGE_API_KEY", "Inetpass1")
+
+                    async with httpx.AsyncClient() as client:
                         for idx, mid in enumerate(id_list):
-                            obj = self.db.query(StorageObject).filter(StorageObject.id == int(mid)).first()
-                            if not obj or not obj.file_url:
-                                raise HTTPException(status_code=404, detail=f"Storage object {mid} not found or has no file_url")
+                            # Get storage object info from Storage API
+                            try:
+                                storage_resp = await client.get(
+                                    f"{STORAGE_API_URL}/storage/objects/{mid}",
+                                    headers={"X-API-KEY": STORAGE_API_KEY}
+                                )
+                                storage_resp.raise_for_status()
+                                obj_data = storage_resp.json()
+                                file_url = obj_data.get('file_url')
+
+                                if not file_url:
+                                    raise HTTPException(status_code=404, detail=f"Storage object {mid} has no file_url")
+                            except Exception as e:
+                                raise HTTPException(status_code=404, detail=f"Storage object {mid} not found: {str(e)}")
                             # HEAD debug
                             try:
-                                hr = await client.head(obj.file_url, follow_redirects=True)
+                                hr = await client.head(file_url, follow_redirects=True)
                                 try:
                                     from ai.routes.dialog_routes import set_dialog_status
                                     set_dialog_status(self.request.id, phase="generate", subphase="music_manual_head", status_code=hr.status_code, content_type=hr.headers.get('content-type'), content_length=int(hr.headers.get('content-length') or -1))
@@ -380,7 +391,7 @@ class AudioDramaGenerator(SpeechGenerator):
                             except Exception:
                                 pass
                             # GET download
-                            r = await client.get(obj.file_url, follow_redirects=True)
+                            r = await client.get(file_url, follow_redirects=True)
                             r.raise_for_status()
                             p = self.temp_dir / f"manual_music_{idx}.mp3"
                             p.write_bytes(r.content)
