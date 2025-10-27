@@ -20,8 +20,10 @@ Pillow==10.1.0            # Image processing
 
 # AI Services - Audio
 elevenlabs==0.2.26        # TTS & Music generation
+pydub==0.25.1             # Audio processing and manipulation
 
 # Utilities
 python-dotenv==1.0.0
 requests==2.31.0
+PyPDF2==3.0.1             # PDF processing for document analysis
 

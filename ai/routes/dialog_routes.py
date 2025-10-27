@@ -5,210 +5,302 @@ Dialog System Routes
 Multi-character dialog generation with TTS.
 
 Features:
-- Generate conversations between multiple characters
-- Automatic TTS for each character
-- Streaming support for long dialogs
-- Background job processing
+- Background job processing for long-running dialog generation
+- Real-time status updates via polling
+- Temporary audio chunk streaming
+- Job cancellation support
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 import logging
+import os
+import time
+import json as _json
+import asyncio
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-
-# Request/Response Models
-class Character(BaseModel):
-    name: str
-    voice: str  # Voice ID for TTS
-    personality: Optional[str] = None
+# Import services
+from ai.services.tts_models import SpeechRequest
+from ai.services.audio_drama_service import AudioDramaGenerator
+from fastapi.encoders import jsonable_encoder
 
 
-class DialogRequest(BaseModel):
-    prompt: str
-    characters: List[Character]
-    num_turns: Optional[int] = 10
-    tts_enabled: Optional[bool] = True
+# In-memory storage for dialog jobs
+TEMP_DIALOG_REGISTRY: Dict[str, List[Dict[str, Any]]] = {}
+TEMP_DIALOG_STATUS: Dict[str, Dict[str, Any]] = {}
+TEMP_DIALOG_RESULTS: Dict[str, Dict[str, Any]] = {}
+TEMP_DIALOG_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
+TASKS: Dict[str, Any] = {}
+STATUS_DIR = "/tmp/dialog_status"
+EVENTS_MAX = 300
 
-
-class DialogJobResponse(BaseModel):
-    job_id: str
-    status: str  # pending, processing, completed, failed
-    message: str
-
-
-class DialogStatus(BaseModel):
-    job_id: str
-    status: str
-    progress: Optional[float] = None  # 0.0 to 1.0
-    current_turn: Optional[int] = None
-    total_turns: Optional[int] = None
-    error: Optional[str] = None
+# Ensure status directory exists
+os.makedirs(STATUS_DIR, exist_ok=True)
 
 
 def get_api_key():
-    return "placeholder"
+    return "Inetpass1"
 
 
-@router.post("/start", response_model=DialogJobResponse)
-async def start_dialog_job(
-    request: DialogRequest,
-    api_key: str = Depends(get_api_key)
-):
-    """
-    Start a dialog generation job
-    
-    Process:
-    1. Generate conversation using AI (Claude/ChatGPT)
-    2. For each line, generate TTS audio
-    3. Store audio chunks temporarily
-    4. Return final dialog with audio URLs
-    """
+def register_temp_dialog_chunks(req_id: str, items: List[Dict[str, Any]]):
+    TEMP_DIALOG_REGISTRY[req_id] = items
+
+
+def _append_status_event(req_id: str, event: Dict[str, Any]):
+    ev = dict(event)
+    ev["ts"] = time.time()
+    hist = TEMP_DIALOG_HISTORY.get(req_id) or []
+    hist.append(ev)
+    if len(hist) > EVENTS_MAX:
+        hist = hist[-EVENTS_MAX:]
+    TEMP_DIALOG_HISTORY[req_id] = hist
+    # Append to file as JSONL for robustness
     try:
-        # TODO: Implement dialog job system
-        # This should be async/background processing
-        # Store job info in Redis or similar
-        
-        job_id = f"dialog_{hash(request.prompt)}"
-        
-        return DialogJobResponse(
-            job_id=job_id,
-            status="pending",
-            message="Dialog generation job started"
-        )
-    except Exception as e:
-        logger.error(f"Dialog start error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        with open(os.path.join(STATUS_DIR, f"{req_id}.events.jsonl"), "a") as f:
+            f.write(_json.dumps(ev) + "\n")
+    except Exception:
+        pass
 
 
-@router.get("/status", response_model=DialogStatus)
-async def get_dialog_status(
-    id: str,
-    api_key: str = Depends(get_api_key)
-):
-    """
-    Check status of dialog generation job
-    """
+def _load_events_from_disk(req_id: str) -> List[Dict[str, Any]]:
+    # Load all events for this req_id from file if present
+    events_path = os.path.join(STATUS_DIR, f"{req_id}.events.jsonl")
+    if not os.path.exists(events_path):
+        return []
     try:
-        # TODO: Implement job status checking
-        # Retrieve from job storage (Redis/DB)
-        
-        return DialogStatus(
-            job_id=id,
-            status="completed",
-            progress=1.0,
-            current_turn=10,
-            total_turns=10
-        )
-    except Exception as e:
-        logger.error(f"Dialog status error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        events: List[Dict[str, Any]] = []
+        with open(events_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(_json.loads(line))
+                except Exception:
+                    pass
+        if len(events) > EVENTS_MAX:
+            events = events[-EVENTS_MAX:]
+        return events
+    except Exception:
+        return []
 
 
-@router.post("/cancel")
-async def cancel_dialog_job(
-    id: str,
-    api_key: str = Depends(get_api_key)
-):
-    """
-    Cancel a running dialog generation job
-    """
+def set_dialog_status(req_id: str, **fields):
+    st = TEMP_DIALOG_STATUS.get(req_id) or {"updated_at": time.time()}
+    st.update(fields)
+    st["updated_at"] = time.time()
+    TEMP_DIALOG_STATUS[req_id] = st
+    _append_status_event(req_id, fields)
+    # Persist to disk for multi-worker visibility
     try:
-        # TODO: Implement job cancellation
-        # Set job status to cancelled
-        # Cleanup temp files
-        
-        return {
-            "job_id": id,
-            "status": "cancelled",
-            "message": "Dialog generation cancelled"
-        }
-    except Exception as e:
-        logger.error(f"Dialog cancel error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        with open(os.path.join(STATUS_DIR, f"{req_id}.json"), "w") as f:
+            _json.dump(st, f)
+    except Exception:
+        pass
+
+
+def set_dialog_result(req_id: str, result: Dict[str, Any]):
+    TEMP_DIALOG_RESULTS[req_id] = result
+    try:
+        with open(os.path.join(STATUS_DIR, f"{req_id}.result.json"), "w") as f:
+            _json.dump(result, f)
+    except Exception:
+        pass
 
 
 @router.get("/tempchunk")
-async def get_temp_dialog_chunk(
-    id: str,
-    index: int,
-    api_key: str = Depends(get_api_key)
-):
+def get_temp_dialog_chunk(id: str, index: int):
     """
-    Get a specific audio chunk from dialog generation
-    
-    Used for streaming dialog as it's being generated
+    Get a temporary audio chunk from dialog generation.
+
+    Used for streaming dialog as it's being generated.
+    Returns the audio file for a specific chunk index.
     """
     try:
-        # TODO: Implement chunk retrieval
-        # Return audio file from temp storage
-        
-        return {
-            "job_id": id,
-            "chunk_index": index,
-            "audio_url": f"https://placeholder.com/chunk_{index}.mp3",
-            "text": "Sample dialog text",
-            "character": "Character1"
-        }
+        items = TEMP_DIALOG_REGISTRY.get(id) or []
+        # Find by original sequence index (robust to filtered registry order)
+        match = None
+        for it in items:
+            if int(it.get("index", -1)) == int(index):
+                match = it
+                break
+        if not match:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        path = match.get("path")
+        if not path or not os.path.exists(path):
+            raise HTTPException(status_code=404, detail="File missing")
+        # Only allow files from /tmp for safety
+        if not os.path.abspath(path).startswith("/tmp/"):
+            raise HTTPException(status_code=403, detail="Forbidden path")
+        # Guess media type by extension (mp3 default)
+        ext = os.path.splitext(path)[1].lower()
+        media = "audio/mpeg" if ext == ".mp3" else "application/octet-stream"
+        return FileResponse(path, media_type=media)
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Chunk retrieval error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/clear_temp")
-async def clear_temp_dialog_chunks(
-    id: str,
+def clear_temp_dialog_chunks(id: str):
+    """
+    Clear temporary dialog chunks after job completion.
+
+    Cleanup temp files to save disk space.
+    """
+    TEMP_DIALOG_REGISTRY.pop(id, None)
+    TEMP_DIALOG_STATUS.pop(id, None)
+    TEMP_DIALOG_HISTORY.pop(id, None)
+    try:
+        os.remove(os.path.join(STATUS_DIR, f"{id}.json"))
+    except Exception:
+        pass
+    try:
+        os.remove(os.path.join(STATUS_DIR, f"{id}.events.jsonl"))
+    except Exception:
+        pass
+    return {"status": "cleared"}
+
+
+@router.get("/status")
+def get_dialog_status(id: str):
+    """
+    Check status of dialog generation job.
+
+    Returns status, progress, and event history.
+    """
+    st = TEMP_DIALOG_STATUS.get(id)
+    if not st:
+        # Try file-backed status for other workers
+        try:
+            with open(os.path.join(STATUS_DIR, f"{id}.json"), "r") as f:
+                st = _json.load(f)
+        except Exception:
+            st = {"status": "unknown"}
+    # Attach result if present (memory or file)
+    res = TEMP_DIALOG_RESULTS.get(id)
+    if not res:
+        try:
+            with open(os.path.join(STATUS_DIR, f"{id}.result.json"), "r") as f:
+                res = _json.load(f)
+        except Exception:
+            res = None
+    if res:
+        st = {**st, "result": res}
+    # Attach history (memory or disk)
+    hist = TEMP_DIALOG_HISTORY.get(id)
+    if not hist:
+        hist = _load_events_from_disk(id)
+        if hist:
+            TEMP_DIALOG_HISTORY[id] = hist
+    if hist:
+        st = {**st, "history": hist[-100:]}
+    return st
+
+
+@router.post("/cancel")
+def cancel_dialog_job(id: str):
+    """
+    Cancel a running dialog generation job.
+
+    Sets status to cancelled and attempts to cancel the background task.
+    """
+    task = TASKS.get(id)
+    if task and not task.done():
+        try:
+            task.cancel()
+        except Exception:
+            pass
+        TEMP_DIALOG_STATUS[id] = {"phase": "cancelled", "updated_at": time.time()}
+        return {"status": "cancelled"}
+    return {"status": "not_running"}
+
+
+@router.post("/start")
+async def start_dialog_job(
+    req: SpeechRequest,
     api_key: str = Depends(get_api_key)
 ):
     """
-    Clear temporary dialog chunks after job completion
-    
-    Cleanup temp files to save disk space
+    Start a dialog generation job.
+
+    Process:
+    1. Validate dialog_mode is enabled
+    2. Create background task for audio drama generation
+    3. Return job_id for status polling
     """
+    if not getattr(req.config, 'dialog_mode', False):
+        raise HTTPException(status_code=400, detail="dialog_mode must be true")
+
     try:
-        # TODO: Implement cleanup
-        # Delete temp files for this job_id
-        
-        return {
-            "job_id": id,
-            "message": "Temporary chunks cleared",
-            "chunks_deleted": 0
-        }
+        # Initialize status
+        try:
+            set_dialog_status(req.id, phase="queued")
+        except Exception:
+            # Fallback file write in case helper fails
+            try:
+                with open(os.path.join(STATUS_DIR, f"{req.id}.json"), "w") as f:
+                    _json.dump({"phase": "queued", "updated_at": time.time()}, f)
+            except Exception:
+                pass
+
+        async def run_job():
+            try:
+                # Force analyze_only False for the generation run
+                req.config.analyze_only = False
+                set_dialog_status(req.id, phase="analyze", subphase="start")
+
+                generator = AudioDramaGenerator(req, api_key, image_gen_func=None)
+
+                # Hard job TTL to avoid wedging a worker (e.g., 180s)
+                saved_audio_obj, production_plan, generated_image_obj = await asyncio.wait_for(
+                    generator.generate(),
+                    timeout=180
+                )
+
+                # Build response compatible with /ai/generate_speech
+                if saved_audio_obj is not None:
+                    response_data = {
+                        "id": saved_audio_obj.id,
+                        "file_url": saved_audio_obj.file_url,
+                        "object_key": saved_audio_obj.object_key,
+                        "original_filename": saved_audio_obj.original_filename,
+                        "mime_type": saved_audio_obj.mime_type,
+                        "file_size": saved_audio_obj.file_size,
+                        "context": saved_audio_obj.context,
+                        "is_public": saved_audio_obj.is_public,
+                        "collection_id": saved_audio_obj.collection_id
+                    }
+                else:
+                    response_data = {}
+
+                response_data['analysis_result'] = production_plan
+
+                if generated_image_obj:
+                    response_data['generated_image'] = {
+                        "id": generated_image_obj.id,
+                        "file_url": generated_image_obj.file_url
+                    }
+
+                set_dialog_result(req.id, response_data)
+                set_dialog_status(req.id, phase="done", result_ready=True)
+
+            except asyncio.CancelledError:
+                set_dialog_status(req.id, phase="cancelled")
+            except asyncio.TimeoutError:
+                set_dialog_status(req.id, phase="error", error="deadline_exceeded")
+            except Exception as e:
+                set_dialog_status(req.id, phase="error", error=str(e))
+
+        task = asyncio.create_task(run_job())
+        TASKS[req.id] = task
+        return {"job_id": req.id, "phase": "queued"}
+
     except Exception as e:
-        logger.error(f"Cleanup error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/result/{job_id}")
-async def get_dialog_result(
-    job_id: str,
-    api_key: str = Depends(get_api_key)
-):
-    """
-    Get final dialog result with all audio chunks
-    """
-    try:
-        # TODO: Implement result retrieval
-        # Return complete dialog with audio URLs
-        
-        return {
-            "job_id": job_id,
-            "status": "completed",
-            "dialog": [
-                {
-                    "turn": 1,
-                    "character": "Character1",
-                    "text": "Hello!",
-                    "audio_url": "https://placeholder.com/turn1.mp3"
-                }
-            ],
-            "total_duration": 0.0,
-            "storage_object_ids": []
-        }
-    except Exception as e:
-        logger.error(f"Result retrieval error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
