@@ -50,6 +50,14 @@ class MusicRequest(BaseModel):
     model: Optional[str] = "suno"  # suno or eleven
 
 
+class AudioGenRequest(BaseModel):
+    """Request model for audio generation (SFX/Music) - compatible with legacy API"""
+    prompt: str
+    duration_ms: Optional[int] = None
+    link_id: Optional[str] = None
+    owner_user_id: Optional[int] = None
+
+
 def get_api_key():
     return "Inetpass1"
 
@@ -165,31 +173,81 @@ async def generate_speech_endpoint(
         raise HTTPException(status_code=500, detail=f"An error occurred during TTS generation: {str(e)}")
 
 
-@router.post("/gensfx", response_model=AudioResponse)
+@router.post("/gensfx")
 async def generate_sfx_endpoint(
     request: SFXRequest,
     api_key: str = Depends(get_api_key)
 ):
     """
-    Generate sound effects from text description
-    
+    Generates a sound effect using ElevenLabs, analyzes its volume, and saves it to storage if it's not silent.
+
     Examples:
     - "dog barking"
     - "thunder and rain"
     - "car engine starting"
     """
+    import os
+    import tempfile
+    from pathlib import Path
+    from ai.services import tts_service
+    from ai.clients.storage_client import save_file_and_record
+
     try:
-        # TODO: Implement SFX generation
-        # Using AudioLDM or similar models via Replicate
-        
-        return AudioResponse(
-            audio_url="https://placeholder.com/sfx.mp3",
-            storage_object_id=None,
-            duration_seconds=request.duration,
-            format="mp3"
+        from elevenlabs.client import AsyncElevenLabs
+
+        print(f"--- SFX Gen: Generating SFX for prompt: '{request.prompt[:80]}...'")
+        client = AsyncElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+
+        audio_stream = client.text_to_sound_effects.convert(text=request.prompt)
+
+        audio_bytes = b""
+        async for chunk in audio_stream:
+            audio_bytes += chunk
+
+        if not audio_bytes:
+            raise HTTPException(status_code=500, detail="ElevenLabs SFX generation returned no data.")
+
+        # --- Audio Analysis ---
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+            temp_file.write(audio_bytes)
+            temp_path = Path(temp_file.name)
+
+        mean_volume = tts_service.analyze_audio_level(temp_path)
+        print(f"--- SFX Gen: Analyzed audio level: {mean_volume} dB")
+
+        # Discard silent or near-silent SFX
+        SILENCE_THRESHOLD = -60.0
+        if mean_volume < SILENCE_THRESHOLD:
+            print(f"--- SFX Gen: SFX is too quiet ({mean_volume} dB), discarding.")
+            temp_path.unlink()
+            raise HTTPException(status_code=422, detail=f"Generated SFX was silent and has been discarded.")
+
+        # --- Save to Storage via HTTP ---
+        filename = f"sfx_{request.prompt.replace(' ', '_')[:20]}.mp3"
+
+        saved_obj = await save_file_and_record(
+            data=audio_bytes,
+            original_filename=filename,
+            context="sfx-generation",
+            is_public=True,
+            collection_id="ai-generated-sfx"
         )
+
+        temp_path.unlink()
+        print(f"--- SFX Gen: Saved SFX to storage object ID {saved_obj.id}")
+
+        return {
+            "id": saved_obj.id,
+            "file_url": saved_obj.file_url,
+            "audio_url": saved_obj.file_url,
+            "storage_object_id": saved_obj.id,
+            "format": "mp3"
+        }
+
     except Exception as e:
         logger.error(f"SFX generation error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
