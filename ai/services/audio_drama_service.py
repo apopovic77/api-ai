@@ -710,126 +710,173 @@ class AudioDramaGenerator(SpeechGenerator):
         return chunk_path
 
     async def _source_single_sfx(self, cue):
-        # SFX generation not implemented yet - skip for now
+        """Generate SFX using ElevenLabs"""
         description = cue.get('description', '')
         if not description:
             return None
 
-        print(f"--- Audio Drama: SFX generation not yet implemented, skipping '{description}'...")
-        try:
-            from ai.routes.dialog_routes import set_dialog_status
-            set_dialog_status(self.request.id, phase="generate", subphase="sfx_skipped", description=description)
-        except Exception:
-            pass
-        return None
+        print(f"--- Audio Drama: Generating SFX for '{description}'...")
 
-        # TODO: Implement SFX generation
-        # try:
-        #     sfx_obj = await generate_sfx_endpoint(
-        #         AudioGenRequest(prompt=description, link_id=None),
-        #         self.api_key,
-        #         self.db
-        #     )
-        #     return sfx_obj
-        # except HTTPException as he:
-        #     # Gracefully skip silent or invalid SFX prompts
-        #     print(f"--- Audio Drama: Skipping SFX due to HTTPException {he.status_code}: {he.detail}")
-        #     try:
-        #         from ai.routes.dialog_routes import set_dialog_status
-        #         set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(he.detail))
-        #     except Exception:
-        #         pass
-        #     return None
-        # except Exception as e:
-        #     print(f"--- Audio Drama: Skipping SFX due to unexpected error: {e}")
-        #     try:
-        #         from ai.routes.dialog_routes import set_dialog_status
-        #         set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(e))
-        #     except Exception:
-        #         pass
-        #     return None
+        try:
+            from elevenlabs.client import AsyncElevenLabs
+            from pathlib import Path
+            import tempfile
+            import os
+            from ai.services import tts_service
+            from ai.clients.storage_client import save_file_and_record, StorageObject
+
+            try:
+                from ai.routes.dialog_routes import set_dialog_status
+                set_dialog_status(self.request.id, phase="generate", subphase="sfx_start", description=description)
+            except Exception:
+                pass
+
+            client = AsyncElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+
+            audio_stream = client.text_to_sound_effects.convert(text=description)
+
+            audio_bytes = b""
+            async for chunk in audio_stream:
+                audio_bytes += chunk
+
+            if not audio_bytes:
+                raise HTTPException(status_code=500, detail="ElevenLabs SFX generation returned no data.")
+
+            # Audio Analysis
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+                temp_file.write(audio_bytes)
+                temp_path = Path(temp_file.name)
+
+            mean_volume = tts_service.analyze_audio_level(temp_path)
+            print(f"--- Audio Drama: SFX audio level: {mean_volume} dB")
+
+            # Discard silent or near-silent SFX
+            SILENCE_THRESHOLD = -60.0
+            if mean_volume < SILENCE_THRESHOLD:
+                print(f"--- Audio Drama: SFX too quiet ({mean_volume} dB), discarding.")
+                temp_path.unlink()
+                try:
+                    from ai.routes.dialog_routes import set_dialog_status
+                    set_dialog_status(self.request.id, phase="generate", subphase="sfx_silent", description=description)
+                except Exception:
+                    pass
+                return None
+
+            # Save to Storage
+            filename = f"sfx_{description.replace(' ', '_')[:20]}.mp3"
+
+            saved_obj = await save_file_and_record(
+                data=audio_bytes,
+                original_filename=filename,
+                context="dialog-sfx",
+                is_public=True,
+                collection_id="dialog-generated-sfx",
+                link_id=self.request.id
+            )
+
+            temp_path.unlink()
+            print(f"--- Audio Drama: Saved SFX to storage object ID {saved_obj.id}")
+
+            try:
+                from ai.routes.dialog_routes import set_dialog_status
+                set_dialog_status(self.request.id, phase="generate", subphase="sfx_done", description=description)
+            except Exception:
+                pass
+
+            return saved_obj
+
+        except HTTPException as he:
+            # Gracefully skip silent or invalid SFX prompts
+            print(f"--- Audio Drama: Skipping SFX due to HTTPException {he.status_code}: {he.detail}")
+            try:
+                from ai.routes.dialog_routes import set_dialog_status
+                set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(he.detail))
+            except Exception:
+                pass
+            return None
+        except Exception as e:
+            print(f"--- Audio Drama: Skipping SFX due to unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                from ai.routes.dialog_routes import set_dialog_status
+                set_dialog_status(self.request.id, phase="generate", subphase="sfx_error", error=str(e))
+            except Exception:
+                pass
+            return None
 
     async def _source_music(self, music_cues):
-        # Music generation not implemented yet
+        """Generate music using ElevenLabs, Stable Audio, or Freesound fallback"""
         if not music_cues:
             return None
         cue = music_cues[0] if isinstance(music_cues, list) else {}
         description = cue.get('description', '')
         length_ms = cue.get('length_ms') or 30000
-        print(f"--- Audio Drama: Sourcing music for '{description}' via internal endpoint...")
-        
-        # Try ElevenLabs first, then Stable Audio (AIMLAPI), then free-sourced fallback
-        async def _download_and_return(obj):
+        print(f"--- Audio Drama: Sourcing music for '{description}'...")
+
+        # Helper to download music from storage URL to temp file
+        async def _download_and_return(file_url: str):
             async with httpx.AsyncClient() as client:
-                r = await client.get(obj.file_url)
+                r = await client.get(file_url)
+                r.raise_for_status()
             path = self.temp_dir / "music.mp3"
             path.write_bytes(r.content)
             print(f"--- Audio Drama: Downloaded music to {path}")
             return path
 
-        # Music generation not yet implemented - skip for now
-        print(f"--- Audio Drama: Music generation not yet implemented, skipping...")
+        # 1) Try ElevenLabs Music Generation
         try:
-            from ai.routes.dialog_routes import set_dialog_status
-            set_dialog_status(self.request.id, phase="generate", subphase="music_skipped", description=description)
-        except Exception:
-            pass
-        # Continue to fallback (Freesound) below
+            from ai.routes.music_generation import generate_music_elevenlabs
 
-        # TODO: Implement Music generation providers
-        # # 1) ElevenLabs
-        # try:
-        #     try:
-        #         from ai.routes.dialog_routes import set_dialog_status
-        #         set_dialog_status(self.request.id, phase="generate", subphase="music_provider_eleven_start")
-        #     except Exception:
-        #         pass
-        #     music_obj = await generate_music_eleven_endpoint(
-        #         AudioGenRequest(prompt=description, link_id=self.request.id, duration_ms=length_ms),
-        #         self.api_key,
-        #         self.db
-        #     )
-        #     if music_obj:
-        #         try:
-        #             from ai.routes.dialog_routes import set_dialog_status
-        #             set_dialog_status(self.request.id, phase="generate", subphase="music_provider_eleven_done")
-        #         except Exception:
-        #             pass
-        #         return await _download_and_return(music_obj)
-        # except Exception as e:
-        #     print(f"--- Audio Drama: ElevenLabs music failed: {e}")
-        #     try:
-        #         from ai.routes.dialog_routes import set_dialog_status
-        #         set_dialog_status(self.request.id, phase="generate", subphase="music_provider_eleven_error", error=str(e))
-        #     except Exception:
-        #         pass
+            try:
+                from ai.routes.dialog_routes import set_dialog_status
+                set_dialog_status(self.request.id, phase="generate", subphase="music_provider_eleven_start")
+            except Exception:
+                pass
 
-        # # 2) Stable Audio via AIMLAPI
-        # try:
-        #     try:
-        #         from ai.routes.dialog_routes import set_dialog_status
-        #         set_dialog_status(self.request.id, phase="generate", subphase="music_provider_aiml_start")
-        #     except Exception:
-        #         pass
-        #     music_obj = await generate_music_endpoint(
-        #         AudioGenRequest(prompt=description, link_id=self.request.id, duration_ms=length_ms),
-        #         self.api_key,
-        #         self.db
-        #     )
-        #     if music_obj:
-        #         try:
-        #             from ai.routes.dialog_routes import set_dialog_status
-        #             set_dialog_status(self.request.id, phase="generate", subphase="music_provider_aiml_done")
-        #         except Exception:
-        #             pass
-        #         return await _download_and_return(music_obj)
-        # except Exception as e:
-        #     print(f"--- Audio Drama: Stable Audio (AIMLAPI) failed: {e}")
-        #     try:
-        #         from ai.routes.dialog_routes import set_dialog_status
-        #         set_dialog_status(self.request.id, phase="generate", subphase="music_provider_aiml_error", error=str(e))
-        #     except Exception:
-        #         pass
+            result = await generate_music_elevenlabs(description, length_ms)
+
+            if result and result.get('audio_url'):
+                try:
+                    from ai.routes.dialog_routes import set_dialog_status
+                    set_dialog_status(self.request.id, phase="generate", subphase="music_provider_eleven_done")
+                except Exception:
+                    pass
+                return await _download_and_return(result['audio_url'])
+        except Exception as e:
+            print(f"--- Audio Drama: ElevenLabs music failed: {e}")
+            try:
+                from ai.routes.dialog_routes import set_dialog_status
+                set_dialog_status(self.request.id, phase="generate", subphase="music_provider_eleven_error", error=str(e))
+            except Exception:
+                pass
+
+        # 2) Try Stable Audio via AIMLAPI
+        try:
+            from ai.routes.music_generation import generate_music_stable_audio
+
+            try:
+                from ai.routes.dialog_routes import set_dialog_status
+                set_dialog_status(self.request.id, phase="generate", subphase="music_provider_aiml_start")
+            except Exception:
+                pass
+
+            result = await generate_music_stable_audio(description, length_ms)
+
+            if result and result.get('audio_url'):
+                try:
+                    from ai.routes.dialog_routes import set_dialog_status
+                    set_dialog_status(self.request.id, phase="generate", subphase="music_provider_aiml_done")
+                except Exception:
+                    pass
+                return await _download_and_return(result['audio_url'])
+        except Exception as e:
+            print(f"--- Audio Drama: Stable Audio (AIMLAPI) failed: {e}")
+            try:
+                from ai.routes.dialog_routes import set_dialog_status
+                set_dialog_status(self.request.id, phase="generate", subphase="music_provider_aiml_error", error=str(e))
+            except Exception:
+                pass
 
         # 3) Free-sourced fallback (Pixabay/Freesound)
         try:
