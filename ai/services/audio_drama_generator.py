@@ -6,9 +6,9 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 import google.generativeai as genai
 
-import tts_service
-import audio_sourcing_service
-from tts_models import SpeechRequest, OpenAITTSConfig
+from ai.services import tts_service
+from ai.services import audio_sourcing_service
+from ai.services.tts_models import SpeechRequest, OpenAITTSConfig
 # Image generation endpoint integration TODO # Allow internal calls
 
 # Load prompts at startup

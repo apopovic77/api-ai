@@ -654,7 +654,7 @@ class AudioDramaGenerator(SpeechGenerator):
         return mixed_bytes
 
     async def _generate_single_dialog_chunk(self, segment):
-        from tts_models import OpenAITTSConfig
+        from ai.services.tts_models import OpenAITTSConfig
         
         speaker = segment.get("speaker", "Unknown")
         text = segment.get("text", "")
