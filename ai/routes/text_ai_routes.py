@@ -187,8 +187,11 @@ async def gemini_endpoint(
             finish_reason="stop"
         )
     except Exception as e:
-        logger.error(f"Gemini error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Gemini error: {error_msg}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.get("/models")
