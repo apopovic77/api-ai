@@ -34,6 +34,7 @@ from ai.routes.music_generation import generate_music_stable_audio, generate_mus
 # Response Models
 class AudioResponse(BaseModel):
     audio_url: str
+    file_url: Optional[str] = None  # Alias for audio_url for frontend compatibility
     storage_object_id: Optional[int] = None
     duration_seconds: Optional[float] = None
     format: str = "mp3"
@@ -271,6 +272,7 @@ async def generate_music_endpoint(
 
         return AudioResponse(
             audio_url=result["audio_url"],
+            file_url=result["audio_url"],  # For frontend compatibility
             storage_object_id=result["storage_object_id"],
             duration_seconds=float(request.duration),
             format=result["format"]
@@ -302,6 +304,7 @@ async def generate_music_eleven_endpoint(
 
         return AudioResponse(
             audio_url=result["audio_url"],
+            file_url=result["audio_url"],  # For frontend compatibility
             storage_object_id=result["storage_object_id"],
             duration_seconds=float(request.duration),
             format=result["format"]
