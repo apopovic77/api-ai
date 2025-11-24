@@ -7,9 +7,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  build-archive:
     runs-on: ubuntu-latest
-
+    outputs:
+      artifact-name: deploy-archive
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -17,7 +18,7 @@ jobs:
       - name: Create deployment archive
         run: |
           echo "📦 Creating deployment archive..."
-          tar -czf ../deploy.tar.gz \
+          tar -czf deploy.tar.gz \
             --exclude='.git' \
             --exclude='.devops' \
             --exclude='.github' \
@@ -28,30 +29,65 @@ jobs:
             --exclude='.env' \
             --exclude='*.log' \
             .
-          mv ../deploy.tar.gz .
           echo "✅ Archive created: $(du -h deploy.tar.gz)"
 
-      - name: Upload archive to server
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-archive
+          path: deploy.tar.gz
+
+  deploy:
+    needs: build-archive
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: arkturian
+            host_secret: DEPLOY_HOST
+            user_secret: DEPLOY_USER
+            key_secret: DEPLOY_SSH_KEY
+            port_secret: DEPLOY_PORT
+            deploy_path: /var/www/api-ai.arkturian.com
+            service_name: api-ai
+            public_url: https://api-ai.arkturian.com
+          - name: arkserver
+            host_secret: DEPLOY_HOST_ARKSERVER
+            user_secret: DEPLOY_USER_ARKSERVER
+            key_secret: DEPLOY_SSH_KEY_ARKSERVER
+            port_secret: DEPLOY_PORT_ARKSERVER
+            deploy_path: /var/www/api-ai.arkserver.arkturian.com
+            service_name: api-ai
+            public_url: https://api-ai.arkserver.arkturian.com
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-archive.outputs.artifact-name }}
+
+      - name: Upload archive to ${{ matrix.target.name }}
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          host: ${{ secrets[matrix.target.host_secret] }}
+          username: ${{ secrets[matrix.target.user_secret] }}
+          key: ${{ secrets[matrix.target.key_secret] }}
+          port: ${{ secrets[matrix.target.port_secret] || 22 }}
           source: "deploy.tar.gz"
           target: "/tmp/"
 
-      - name: Deploy to server
+      - name: Deploy to ${{ matrix.target.name }}
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          host: ${{ secrets[matrix.target.host_secret] }}
+          username: ${{ secrets[matrix.target.user_secret] }}
+          key: ${{ secrets[matrix.target.key_secret] }}
+          port: ${{ secrets[matrix.target.port_secret] || 22 }}
           script: |
             set -e
 
-            DEPLOY_PATH="/var/www/api-ai.arkturian.com"
+            DEPLOY_PATH="${{ matrix.target.deploy_path }}"
             BACKUP_DIR="/var/backups"
             BACKUP_PREFIX="api-ai"
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -78,23 +114,23 @@ jobs:
             /root/.pyenv/versions/3.11.9/bin/pip install -r requirements.txt
 
             echo "🔄 Restarting API service..."
-            systemctl restart api-ai || echo "⚠️  Service restart may need manual intervention"
+            systemctl restart ${{ matrix.target.service_name }} || echo "⚠️  Service restart may need manual intervention"
 
-            echo "✅ Deployment completed successfully!"
-            echo "📁 Live at: https://api-ai.arkturian.com"
+            echo "✅ Deployment completed successfully for ${{ matrix.target.name }}!"
+            echo "📁 Live at: ${{ matrix.target.public_url }}"
             echo "💾 Backup: $BACKUP_PATH"
 
       - name: Notify on success
         if: success()
         run: |
           echo "✅ Deployment successful!"
-          echo "📍 Site: https://api-ai.arkturian.com"
+          echo "📍 Site: ${{ matrix.target.public_url }}"
           echo "📦 Commit: ${{ github.sha }}"
 
       - name: Notify on failure
         if: failure()
         run: |
-          echo "❌ Deployment failed for commit ${{ github.sha }}"
+          echo "❌ Deployment failed for commit ${{ github.sha }} to ${{ matrix.target.name }}"
           echo "Check logs above for details"
 
   trigger-sdk-regeneration:
