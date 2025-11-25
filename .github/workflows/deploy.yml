@@ -57,7 +57,7 @@ jobs:
             user_secret: DEPLOY_USER_ARKSERVER
             key_secret: DEPLOY_SSH_KEY_ARKSERVER
             port_secret: DEPLOY_PORT_ARKSERVER
-            deploy_path: /var/www/api-ai.arkserver.arkturian.com
+            deploy_path: /var/www/api-ai.arkturian.com
             service_name: api-ai
             public_url: https://api-ai.arkserver.arkturian.com
 
@@ -70,20 +70,20 @@ jobs:
       - name: Upload archive to ${{ matrix.target.name }}
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets[matrix.target.host_secret] }}
-          username: ${{ secrets[matrix.target.user_secret] }}
-          key: ${{ secrets[matrix.target.key_secret] }}
-          port: ${{ secrets[matrix.target.port_secret] || 22 }}
+          host: ${{ secrets[matrix.target.host_secret] || secrets.DEPLOY_HOST }}
+          username: ${{ secrets[matrix.target.user_secret] || secrets.DEPLOY_USER }}
+          key: ${{ secrets[matrix.target.key_secret] || secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets[matrix.target.port_secret] || secrets.DEPLOY_PORT || 22 }}
           source: "deploy.tar.gz"
           target: "/tmp/"
 
       - name: Deploy to ${{ matrix.target.name }}
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets[matrix.target.host_secret] }}
-          username: ${{ secrets[matrix.target.user_secret] }}
-          key: ${{ secrets[matrix.target.key_secret] }}
-          port: ${{ secrets[matrix.target.port_secret] || 22 }}
+          host: ${{ secrets[matrix.target.host_secret] || secrets.DEPLOY_HOST }}
+          username: ${{ secrets[matrix.target.user_secret] || secrets.DEPLOY_USER }}
+          key: ${{ secrets[matrix.target.key_secret] || secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets[matrix.target.port_secret] || secrets.DEPLOY_PORT || 22 }}
           script: |
             set -e
 
