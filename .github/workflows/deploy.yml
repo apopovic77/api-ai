@@ -3,77 +3,166 @@ name: Build & Deploy
 on:
   push:
     branches:
-      - {{MAIN_BRANCH}}
+      - main
   workflow_dispatch:
 
 jobs:
-  build-and-deploy:
+  build-archive:
     runs-on: ubuntu-latest
-
+    outputs:
+      artifact-name: deploy-archive
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Create deployment archive
+        run: |
+          echo "📦 Creating deployment archive..."
+          tar -czf deploy.tar.gz \
+            --exclude='.git' \
+            --exclude='.devops' \
+            --exclude='.github' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='.venv' \
+            --exclude='venv' \
+            --exclude='.env' \
+            --exclude='*.log' \
+            .
+          echo "✅ Archive created: $(du -h deploy.tar.gz)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          node-version: '{{NODE_VERSION}}'
-          cache: 'npm'
+          name: deploy-archive
+          path: deploy.tar.gz
 
-      - name: Install dependencies
-        run: {{INSTALL_DEPS_COMMAND}}
+  deploy:
+    needs: build-archive
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: arkturian
+            host_secret: DEPLOY_HOST
+            user_secret: DEPLOY_USER
+            key_secret: DEPLOY_SSH_KEY
+            port_secret: DEPLOY_PORT
+            deploy_path: /var/www/api-ai.arkturian.com
+            service_name: api-ai
+            public_url: https://api-ai.arkturian.com
+          - name: arkserver
+            host_secret: DEPLOY_HOST_ARKSERVER
+            user_secret: DEPLOY_USER_ARKSERVER
+            key_secret: DEPLOY_SSH_KEY_ARKSERVER
+            port_secret: DEPLOY_PORT_ARKSERVER
+            deploy_path: /var/www/api-ai.arkturian.com
+            service_name: api-ai
+            public_url: https://api-ai.arkserver.arkturian.com
 
-      - name: Build application
-        run: {{BUILD_COMMAND}}
-        env:
-          NODE_ENV: production
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-archive.outputs.artifact-name }}
 
-      - name: Deploy to server
+      - name: Upload archive to ${{ matrix.target.name }}
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets[matrix.target.host_secret] || secrets.DEPLOY_HOST }}
+          username: ${{ secrets[matrix.target.user_secret] || secrets.DEPLOY_USER }}
+          key: ${{ secrets[matrix.target.key_secret] || secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets[matrix.target.port_secret] || secrets.DEPLOY_PORT || 22 }}
+          source: "deploy.tar.gz"
+          target: "/tmp/"
+
+      - name: Deploy to ${{ matrix.target.name }}
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          host: ${{ secrets[matrix.target.host_secret] || secrets.DEPLOY_HOST }}
+          username: ${{ secrets[matrix.target.user_secret] || secrets.DEPLOY_USER }}
+          key: ${{ secrets[matrix.target.key_secret] || secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets[matrix.target.port_secret] || secrets.DEPLOY_PORT || 22 }}
           script: |
             set -e
 
-            REPO_PATH="{{REPO_ROOT}}"
-            DEPLOY_PATH="{{DEPLOY_PATH}}"
+            DEPLOY_PATH="${{ matrix.target.deploy_path }}"
             BACKUP_DIR="/var/backups"
-            BACKUP_PREFIX="{{BACKUP_PREFIX}}"
+            BACKUP_PREFIX="api-ai"
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
             BACKUP_PATH="$BACKUP_DIR/${BACKUP_PREFIX}-${TIMESTAMP}"
 
-            cd "$REPO_PATH"
-
-            git fetch origin {{MAIN_BRANCH}}
-            git reset --hard origin/{{MAIN_BRANCH}}
-
-            {{INSTALL_DEPS_COMMAND}}
-
-            {{BUILD_COMMAND}}
+            echo "🎯 Deploy to: $DEPLOY_PATH"
 
             if [ -d "$DEPLOY_PATH" ]; then
-              echo "Creating backup..."
+              echo "💾 Creating backup..."
               mkdir -p "$BACKUP_DIR"
               cp -r "$DEPLOY_PATH" "$BACKUP_PATH"
+              echo "✅ Backup created: $BACKUP_PATH"
             fi
 
-            echo "Deploying new build..."
+            echo "🚀 Deploying Python API..."
             mkdir -p "$DEPLOY_PATH"
-            rsync -av --delete "$REPO_PATH/dist/" "$DEPLOY_PATH/"
+            
+            # Extract archive directly to deploy path
+            tar -xzf /tmp/deploy.tar.gz -C "$DEPLOY_PATH"
+            rm -f /tmp/deploy.tar.gz
 
-            chown -R {{WEB_USER}}:{{WEB_GROUP}} "$DEPLOY_PATH"
-            chmod -R 755 "$DEPLOY_PATH"
+            echo "📦 Installing Python dependencies..."
+            cd "$DEPLOY_PATH"
+            /root/.pyenv/versions/3.11.9/bin/pip install -r requirements.txt
 
-            echo "Deployment completed successfully!"
-            echo "Backup saved to: $BACKUP_PATH"
+            echo "🔄 Restarting API service..."
+            systemctl restart ${{ matrix.target.service_name }} || echo "⚠️  Service restart may need manual intervention"
+
+            echo "✅ Deployment completed successfully for ${{ matrix.target.name }}!"
+            echo "📁 Live at: ${{ matrix.target.public_url }}"
+            echo "💾 Backup: $BACKUP_PATH"
 
       - name: Notify on success
         if: success()
-        run: echo "✅ Deployment successful for commit ${{ github.sha }}"
+        run: |
+          echo "✅ Deployment successful!"
+          echo "📍 Site: ${{ matrix.target.public_url }}"
+          echo "📦 Commit: ${{ github.sha }}"
 
       - name: Notify on failure
         if: failure()
-        run: echo "❌ Deployment failed for commit ${{ github.sha }}"
+        run: |
+          echo "❌ Deployment failed for commit ${{ github.sha }} to ${{ matrix.target.name }}"
+          echo "Check logs above for details"
+
+  trigger-sdk-regeneration:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+      - name: Trigger TypeScript SDK regeneration
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: apopovic77/api-ai-typescript-sdk
+          event-type: openapi-updated
+
+      - name: Trigger C# SDK regeneration
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: apopovic77/api-ai-csharp-sdk
+          event-type: openapi-updated
+
+  trigger-e2e-tests:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+      - name: Trigger E2E tests
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: apopovic77/api-e2e-tests
+          event-type: api-ai-deployed
+          client-payload: '{"api": "ai", "sha": "${{ github.sha }}"}'
