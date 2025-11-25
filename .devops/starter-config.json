@@ -1,9 +1,9 @@
 {
   "BACKUP_PREFIX": "arkturian-ai-api",
-  "BUILD_COMMAND": "echo '\u2705 Python API - no build needed'",
+  "BUILD_COMMAND": "npm run build",
   "DEPLOY_PATH": "/var/www/api-ai.arkturian.com",
   "DEV_BRANCH": "dev",
-  "INSTALL_DEPS_COMMAND": "pip install -r requirements.txt",
+  "INSTALL_DEPS_COMMAND": "npm ci --production=false",
   "MAIN_BRANCH": "main",
   "NODE_VERSION": "18",
   "PROJECT_NAME": "Arkturian AI API",

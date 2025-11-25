@@ -2,8 +2,10 @@
 
 set -euo pipefail
 
-REPO_ROOT="/Volumes/DatenAP/Code/api-ai"
-BUILD_COMMAND="echo '✅ Python API - no build needed'"
+# Resolve repository root relative to this script so it works everywhere.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
+BUILD_COMMAND="{{BUILD_COMMAND}}"
 
 usage() {
   cat <<'USAGE'
