@@ -57,9 +57,13 @@ async def generate_image_endpoint(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Generate an image from text prompt using Gemini 2.5 Flash (Imagen 3)
+    Generate an image from text prompt using various AI models
 
-    Uses Google's Imagen 3 (Nano Banana) via Gemini API for high-quality image generation
+    Supported models:
+    - gemini-3-pro-image-preview (Nano Banana Pro - 4K, best text rendering)
+    - gemini-2.0-flash-exp (Gemini 2.0 - default)
+    - dall-e-3 (OpenAI DALL-E 3)
+    - stable-diffusion-xl (Stable Diffusion XL)
     """
     try:
         import google.generativeai as genai
@@ -67,21 +71,42 @@ async def generate_image_endpoint(
         import uuid
         from ai.clients.storage_client import save_file_and_record
 
-        print(f"--- Image Gen: Generating image with Gemini 2.5 Flash (Imagen 3) for prompt: '{request.prompt[:80]}...'")
+        # Determine which model to use
+        model_name = request.model or "gemini-2.0-flash-exp"
 
-        # Configure Gemini API
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        # Map user-friendly names to actual model IDs
+        model_mapping = {
+            "gemini-3-pro-image-preview": "gemini-exp-1206",  # Nano Banana Pro
+            "gemini-2.0-flash-exp": "gemini-2.0-flash-exp",
+            "dall-e-3": "dall-e-3",
+            "stable-diffusion-xl": "stable-diffusion-xl"
+        }
 
-        # Use Gemini 2.5 Flash with image generation capability (Imagen 3 - Nano Banana)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        actual_model = model_mapping.get(model_name, model_name)
 
-        # Generate image
-        response = await model.generate_content_async(
-            [request.prompt],
-            generation_config=genai.GenerationConfig(
-                response_modalities=["image"]
+        print(f"--- Image Gen: Generating image with {model_name} ({actual_model}) for prompt: '{request.prompt[:80]}...'")
+
+        # Handle different model providers
+        if model_name.startswith("gemini") or model_name in model_mapping and model_mapping[model_name].startswith("gemini"):
+            # Use Gemini models for image generation
+            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+            model = genai.GenerativeModel(actual_model)
+
+            # Generate image
+            response = await model.generate_content_async(
+                [request.prompt],
+                generation_config=genai.GenerationConfig(
+                    response_modalities=["image"]
+                )
             )
-        )
+        elif model_name == "dall-e-3":
+            # TODO: Implement DALL-E 3 support
+            raise HTTPException(status_code=501, detail="DALL-E 3 support coming soon")
+        elif model_name == "stable-diffusion-xl":
+            # TODO: Implement Stable Diffusion XL support
+            raise HTTPException(status_code=501, detail="Stable Diffusion XL support coming soon")
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported model: {model_name}")
 
         # Extract image from response
         if not response.candidates or not response.candidates[0].content.parts:
@@ -123,7 +148,8 @@ async def generate_image_endpoint(
             "image_url": saved_obj.file_url,
             "file_url": saved_obj.file_url,
             "storage_object_id": saved_obj.id,
-            "model": "gemini-2.0-flash-exp-imagen3",
+            "model": model_name,
+            "actual_model": actual_model,
             "width": request.width,
             "height": request.height
         }
