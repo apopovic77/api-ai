@@ -8,13 +8,15 @@ Endpoints for audio generation:
 - Music Generation
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 from typing import Optional
 import logging
 import re
+import io
+import os
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -29,6 +31,7 @@ from ai.services.speech_service import SpeechGenerator
 from ai.services.audio_drama_service import AudioDramaGenerator
 from ai.clients.storage_client import StorageObject
 from ai.routes.music_generation import generate_music_stable_audio, generate_music_elevenlabs
+from openai import AsyncOpenAI
 
 
 # Response Models
@@ -253,6 +256,53 @@ async def generate_sfx_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/transcribe")
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    model: str = "whisper-1",
+    prompt: Optional[str] = None,
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Transcribe an uploaded audio file using OpenAI Whisper.
+
+    Supports typical audio MIME types (mp3, m4a, wav, webm, etc.).
+    """
+    try:
+        if not os.getenv("OPENAI_API_KEY"):
+            raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+        # OpenAI SDK expects a file-like object with a name attribute
+        audio_buffer = io.BytesIO(data)
+        audio_buffer.name = file.filename or "audio.webm"
+
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        result = await client.audio.transcriptions.create(
+            model=model,
+            file=audio_buffer,
+            prompt=prompt
+        )
+
+        text = getattr(result, "text", None)
+        if not text:
+            # Fallback to serializing the full response
+            return jsonable_encoder(result)
+
+        return {"text": text, "model": model, "prompt": prompt, "filename": file.filename}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Transcription error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/genmusic", response_model=AudioResponse)
 async def generate_music_endpoint(
     request: MusicRequest,
@@ -314,4 +364,3 @@ async def generate_music_eleven_endpoint(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-

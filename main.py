@@ -89,7 +89,8 @@ def root():
                 "POST /ai/generate_speech",
                 "POST /ai/gensfx",
                 "POST /ai/genmusic",
-                "POST /ai/genmusic_eleven"
+                "POST /ai/genmusic_eleven",
+                "POST /ai/transcribe"
             ],
             "dialog": [
                 "POST /ai/dialog/start",
@@ -133,4 +134,3 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
-
