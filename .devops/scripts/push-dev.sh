@@ -5,14 +5,14 @@ set -euo pipefail
 # Resolve repository root relative to this script so it works on any machine.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
-DEV_BRANCH="{{DEV_BRANCH}}"
+DEV_BRANCH="dev"
 
 usage() {
   cat <<'USAGE'
 Usage: push-dev.sh <commit-message>
 
 Stages all changes, commits them to the development branch with the provided
-message, fast-forwards from origin, and pushes to origin {{DEV_BRANCH}}.
+message, fast-forwards from origin, and pushes to origin dev.
 USAGE
 }
 
