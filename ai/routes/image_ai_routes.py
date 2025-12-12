@@ -60,8 +60,8 @@ async def generate_image_endpoint(
     Generate an image from text prompt using various AI models
 
     Supported models:
-    - gemini-2.0-flash-exp (Gemini 2.0 Flash - default, supports image generation)
-    - gemini-2.0-flash-preview-image-generation (Gemini 2.0 Flash Image Preview)
+    - gemini-2.0-flash-preview-image-generation (Gemini 2.0 Flash Image - default)
+    - imagen-3.0-generate-002 (Google Imagen 3)
     - dall-e-3 (OpenAI DALL-E 3)
     - stable-diffusion-xl (Stable Diffusion XL)
     """
@@ -73,13 +73,14 @@ async def generate_image_endpoint(
         import base64
         from ai.clients.storage_client import save_file_and_record
 
-        # Determine which model to use
-        model_name = request.model or "gemini-2.0-flash-exp"
+        # Determine which model to use - default to image generation model
+        model_name = request.model or "gemini-2.0-flash-preview-image-generation"
 
         # Map user-friendly names to actual model IDs
         model_mapping = {
-            "gemini-2.0-flash-exp": "gemini-2.0-flash-exp",
             "gemini-2.0-flash-preview-image-generation": "gemini-2.0-flash-preview-image-generation",
+            "imagen-3": "imagen-3.0-generate-002",
+            "imagen-3.0-generate-002": "imagen-3.0-generate-002",
             "dall-e-3": "dall-e-3",
             "stable-diffusion-xl": "stable-diffusion-xl"
         }
