@@ -25,7 +25,7 @@ class ImageGenRequest(BaseModel):
     height: Optional[int] = 1024
     steps: Optional[int] = 30
     guidance_scale: Optional[float] = 7.5
-    model: Optional[str] = "gemini-2.0-flash-preview-image-generation"
+    model: Optional[str] = "gemini-2.5-flash-image"  # Nano Banana - fast image generation
 
 
 class ImageResponse(BaseModel):
@@ -60,10 +60,10 @@ async def generate_image_endpoint(
     Generate an image from text prompt using various AI models
 
     Supported models:
-    - gemini-2.0-flash-preview-image-generation (Gemini 2.0 Flash Image - default)
-    - imagen-3.0-generate-002 (Google Imagen 3)
+    - gemini-2.5-flash-image (Nano Banana - fast, default)
+    - gemini-3-pro-image-preview (Nano Banana Pro - best quality)
+    - imagen-4.0-generate-001 (Google Imagen 4)
     - dall-e-3 (OpenAI DALL-E 3)
-    - stable-diffusion-xl (Stable Diffusion XL)
     """
     try:
         from google import genai
@@ -73,16 +73,21 @@ async def generate_image_endpoint(
         import base64
         from ai.clients.storage_client import save_file_and_record
 
-        # Determine which model to use - default to image generation model
-        model_name = request.model or "gemini-2.0-flash-preview-image-generation"
+        # Determine which model to use - default to Nano Banana
+        model_name = request.model or "gemini-2.5-flash-image"
 
         # Map user-friendly names to actual model IDs
         model_mapping = {
-            "gemini-2.0-flash-preview-image-generation": "gemini-2.0-flash-preview-image-generation",
-            "imagen-3": "imagen-3.0-generate-002",
-            "imagen-3.0-generate-002": "imagen-3.0-generate-002",
+            # Gemini Image Models (Nano Banana)
+            "nano-banana": "gemini-2.5-flash-image",
+            "nano-banana-pro": "gemini-3-pro-image-preview",
+            "gemini-2.5-flash-image": "gemini-2.5-flash-image",
+            "gemini-3-pro-image-preview": "gemini-3-pro-image-preview",
+            # Imagen 4
+            "imagen-4": "imagen-4.0-generate-001",
+            "imagen-4.0-generate-001": "imagen-4.0-generate-001",
+            # Others
             "dall-e-3": "dall-e-3",
-            "stable-diffusion-xl": "stable-diffusion-xl"
         }
 
         actual_model = model_mapping.get(model_name, model_name)
