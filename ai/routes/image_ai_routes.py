@@ -25,7 +25,7 @@ class ImageGenRequest(BaseModel):
     height: Optional[int] = 1024
     steps: Optional[int] = 30
     guidance_scale: Optional[float] = 7.5
-    model: Optional[str] = "flux-dev"
+    model: Optional[str] = "gemini-2.0-flash-preview-image-generation"
 
 
 class ImageResponse(BaseModel):
