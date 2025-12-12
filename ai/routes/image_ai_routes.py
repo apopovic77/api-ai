@@ -60,15 +60,17 @@ async def generate_image_endpoint(
     Generate an image from text prompt using various AI models
 
     Supported models:
-    - gemini-3-pro-image-preview (Nano Banana Pro - 4K, best text rendering)
-    - gemini-2.0-flash-exp (Gemini 2.0 - default)
+    - gemini-2.0-flash-exp (Gemini 2.0 Flash - default, supports image generation)
+    - gemini-2.0-flash-preview-image-generation (Gemini 2.0 Flash Image Preview)
     - dall-e-3 (OpenAI DALL-E 3)
     - stable-diffusion-xl (Stable Diffusion XL)
     """
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
         import os
         import uuid
+        import base64
         from ai.clients.storage_client import save_file_and_record
 
         # Determine which model to use
@@ -76,8 +78,8 @@ async def generate_image_endpoint(
 
         # Map user-friendly names to actual model IDs
         model_mapping = {
-            "gemini-3-pro-image-preview": "gemini-exp-1206",  # Nano Banana Pro
             "gemini-2.0-flash-exp": "gemini-2.0-flash-exp",
+            "gemini-2.0-flash-preview-image-generation": "gemini-2.0-flash-preview-image-generation",
             "dall-e-3": "dall-e-3",
             "stable-diffusion-xl": "stable-diffusion-xl"
         }
@@ -87,18 +89,29 @@ async def generate_image_endpoint(
         print(f"--- Image Gen: Generating image with {model_name} ({actual_model}) for prompt: '{request.prompt[:80]}...'")
 
         # Handle different model providers
-        if model_name.startswith("gemini") or model_name in model_mapping and model_mapping[model_name].startswith("gemini"):
-            # Use Gemini models for image generation
-            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-            model = genai.GenerativeModel(actual_model)
+        if model_name.startswith("gemini"):
+            # Use new Google GenAI SDK for image generation
+            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-            # Generate image
-            response = await model.generate_content_async(
-                [request.prompt],
-                generation_config=genai.GenerationConfig(
-                    response_modalities=["image"]
+            # Generate image using the new API
+            response = client.models.generate_content(
+                model=actual_model,
+                contents=request.prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE"]
                 )
             )
+
+            # Extract image from response
+            image_bytes = None
+            for part in response.candidates[0].content.parts:
+                if part.inline_data is not None:
+                    image_bytes = part.inline_data.data
+                    break
+
+            if not image_bytes:
+                raise HTTPException(status_code=500, detail="No image found in Gemini response.")
+
         elif model_name == "dall-e-3":
             # TODO: Implement DALL-E 3 support
             raise HTTPException(status_code=501, detail="DALL-E 3 support coming soon")
@@ -107,23 +120,6 @@ async def generate_image_endpoint(
             raise HTTPException(status_code=501, detail="Stable Diffusion XL support coming soon")
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported model: {model_name}")
-
-        # Extract image from response
-        if not response.candidates or not response.candidates[0].content.parts:
-            raise HTTPException(status_code=500, detail="Gemini image generation returned no data.")
-
-        # Find the image part
-        image_part = None
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, 'inline_data') and part.inline_data:
-                image_part = part
-                break
-
-        if not image_part:
-            raise HTTPException(status_code=500, detail="No image found in Gemini response.")
-
-        # Get image bytes
-        image_bytes = image_part.inline_data.data
 
         # Generate filename
         filename = f"img_{str(uuid.uuid4())[:8]}.png"
