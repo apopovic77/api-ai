@@ -6,6 +6,7 @@ and manage storage objects without direct database access.
 """
 
 import httpx
+import mimetypes
 import os
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
@@ -88,9 +89,14 @@ async def save_file_and_record(
     if owner_email:
         form_data["owner_email"] = owner_email
 
+    # Detect MIME type from filename extension
+    mime_type, _ = mimetypes.guess_type(original_filename)
+    if not mime_type:
+        mime_type = "application/octet-stream"
+
     # Prepare file
     files = {
-        "file": (original_filename, data, "application/octet-stream")
+        "file": (original_filename, data, mime_type)
     }
 
     # Upload to Storage API
