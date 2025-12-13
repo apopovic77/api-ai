@@ -12,7 +12,8 @@ aiofiles==23.2.1
 # AI Services - Text
 anthropic==0.7.7          # Claude AI
 openai==1.3.7             # ChatGPT, DALL-E, TTS
-google-genai>=0.4.0  # New Google GenAI SDK with image generation support
+google-genai>=0.4.0       # Google GenAI SDK for image generation
+google-generativeai>=0.8.0  # Google Gemini API for audio transcription
 
 # AI Services - Image
 replicate==0.22.0         # Image models (Flux, etc.)

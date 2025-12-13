@@ -264,35 +264,22 @@ async def transcribe_audio(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Transcribe an uploaded audio file using OpenAI Whisper.
+    Transcribe an uploaded audio file using OpenAI Whisper or Google Gemini.
+
+    Models:
+    - whisper-1: OpenAI Whisper (default)
+    - gemini-1.5-flash: Google Gemini 1.5 Flash (fast, cost-effective)
+    - gemini-1.5-pro: Google Gemini 1.5 Pro (higher quality)
+    - gemini-2.0-flash-exp: Google Gemini 2.0 Flash (experimental, latest)
 
     Supports typical audio MIME types (mp3, m4a, wav, webm, etc.).
     """
     try:
-        if not os.getenv("OPENAI_API_KEY"):
-            raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
-
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
-
-        # OpenAI SDK expects a file-like object with a name attribute
-        audio_buffer = io.BytesIO(data)
-        audio_buffer.name = file.filename or "audio.webm"
-
-        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        result = await client.audio.transcriptions.create(
-            model=model,
-            file=audio_buffer,
-            prompt=prompt
-        )
-
-        text = getattr(result, "text", None)
-        if not text:
-            # Fallback to serializing the full response
-            return jsonable_encoder(result)
-
-        return {"text": text, "model": model, "prompt": prompt, "filename": file.filename}
+        # Route to appropriate service based on model
+        if model.startswith("gemini"):
+            return await _transcribe_with_gemini(file, model, prompt)
+        else:
+            return await _transcribe_with_whisper(file, model, prompt)
 
     except HTTPException:
         raise
@@ -301,6 +288,119 @@ async def transcribe_audio(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _transcribe_with_whisper(
+    file: UploadFile,
+    model: str,
+    prompt: Optional[str] = None
+):
+    """Transcribe audio using OpenAI Whisper"""
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+    # OpenAI SDK expects a file-like object with a name attribute
+    audio_buffer = io.BytesIO(data)
+    audio_buffer.name = file.filename or "audio.webm"
+
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    result = await client.audio.transcriptions.create(
+        model=model,
+        file=audio_buffer,
+        prompt=prompt
+    )
+
+    text = getattr(result, "text", None)
+    if not text:
+        # Fallback to serializing the full response
+        return jsonable_encoder(result)
+
+    return {"text": text, "model": model, "prompt": prompt, "filename": file.filename}
+
+
+async def _transcribe_with_gemini(
+    file: UploadFile,
+    model: str,
+    prompt: Optional[str] = None
+):
+    """Transcribe audio using Google Gemini"""
+    import tempfile
+    from pathlib import Path
+
+    if not os.getenv("GOOGLE_API_KEY"):
+        raise HTTPException(status_code=500, detail="Google API key not configured.")
+
+    try:
+        import google.generativeai as genai
+
+        # Configure Gemini
+        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+        # Read audio data
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+        # Save to temporary file (Gemini needs a file path)
+        suffix = Path(file.filename).suffix if file.filename else ".mp3"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_file.write(data)
+            temp_path = Path(temp_file.name)
+
+        try:
+            # Upload file to Gemini
+            logger.info(f"Uploading audio file to Gemini: {temp_path}")
+            audio_file = genai.upload_file(path=str(temp_path))
+
+            # Create model
+            gemini_model = genai.GenerativeModel(model)
+
+            # Create transcription prompt
+            transcription_prompt = "Transcribe this audio file accurately. Provide only the transcription text."
+            if prompt:
+                transcription_prompt = f"{prompt}\n\nTranscribe this audio file accurately."
+
+            # Generate transcription
+            logger.info(f"Starting Gemini transcription with model: {model}")
+            response = gemini_model.generate_content([
+                transcription_prompt,
+                audio_file
+            ])
+
+            # Extract text
+            if not response or not response.text:
+                raise HTTPException(status_code=500, detail="Gemini returned empty response.")
+
+            transcription_text = response.text.strip()
+
+            logger.info(f"Gemini transcription completed: {len(transcription_text)} characters")
+
+            return {
+                "text": transcription_text,
+                "model": model,
+                "prompt": prompt,
+                "filename": file.filename,
+                "provider": "gemini"
+            }
+
+        finally:
+            # Clean up temporary file
+            temp_path.unlink(missing_ok=True)
+
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="google-generativeai package not installed. Run: pip install google-generativeai"
+        )
+    except Exception as e:
+        logger.error(f"Gemini transcription error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Gemini transcription failed: {str(e)}")
 
 
 @router.post("/genmusic", response_model=AudioResponse)
