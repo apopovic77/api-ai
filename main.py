@@ -90,7 +90,7 @@ def root():
                 "POST /ai/gensfx",
                 "POST /ai/genmusic",
                 "POST /ai/genmusic_eleven",
-                "POST /ai/transcribe"
+                "POST /ai/transcribe (Whisper + Gemini)"
             ],
             "dialog": [
                 "POST /ai/dialog/start",
