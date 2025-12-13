@@ -94,8 +94,8 @@ async def generate_image_endpoint(
 
         print(f"--- Image Gen: Generating image with {model_name} ({actual_model}) for prompt: '{request.prompt[:80]}...'")
 
-        # Handle different model providers
-        if model_name.startswith("gemini"):
+        # Handle different model providers based on actual_model (after mapping)
+        if actual_model.startswith("gemini") or actual_model.startswith("imagen"):
             # Use new Google GenAI SDK for image generation
             client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
