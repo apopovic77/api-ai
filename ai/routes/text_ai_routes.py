@@ -307,17 +307,29 @@ async def gemini_endpoint(
         tokens_used = None
         input_tokens = 0
         output_tokens = 0
+
+        # Debug log to see what we get from Gemini
+        logger.info(f"Gemini response type: {type(response)}")
+        logger.info(f"Has usage_metadata: {hasattr(response, 'usage_metadata')}")
+        if hasattr(response, 'usage_metadata'):
+            logger.info(f"usage_metadata: {response.usage_metadata}")
+
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
             input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
             output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) or 0
             tokens_used = input_tokens + output_tokens
+            logger.info(f"Extracted tokens: input={input_tokens}, output={output_tokens}")
 
-        # Track usage for cost monitoring
-        cost_tracker.track_usage(
-            model=model_name,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens
-        )
+        # Track usage for cost monitoring (even if 0, to count requests)
+        if input_tokens > 0 or output_tokens > 0:
+            cost_tracker.track_usage(
+                model=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens
+            )
+            logger.info(f"Tracked Gemini usage: {input_tokens}in/{output_tokens}out")
+        else:
+            logger.warning(f"No token info from Gemini - cannot track usage")
 
         return AIResponse(
             response=response.text,
