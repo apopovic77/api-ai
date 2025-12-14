@@ -100,12 +100,18 @@ async def claude_endpoint(
 
         # Call claude -p in subprocess
         def run_claude_cli():
+            import os
+            # Create env with HOME=/root for Claude credentials
+            env = os.environ.copy()
+            env["NO_COLOR"] = "1"
+            env["HOME"] = "/root"  # Claude credentials are in /root/.claude
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 minute timeout for longer prompts
-                env={**subprocess.os.environ, "NO_COLOR": "1"}
+                env=env
             )
             return result
 
