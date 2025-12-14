@@ -1,0 +1,327 @@
+"""
+Gemini API Cost Tracker Service
+===============================
+
+Tracks token usage and costs for Gemini API calls.
+Sends Telegram alerts at configurable thresholds.
+Blocks requests when monthly budget is exceeded.
+
+Pricing (Gemini 2.0 Flash - as of Dec 2024):
+- Input: $0.075 / 1M tokens
+- Output: $0.30 / 1M tokens
+"""
+
+import json
+import logging
+import os
+import threading
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+# Gemini 2.0 Flash pricing (USD per 1M tokens)
+PRICING = {
+    "gemini-2.0-flash-exp": {"input": 0.075, "output": 0.30},
+    "gemini-2.0-flash": {"input": 0.075, "output": 0.30},
+    "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini-2.5-pro": {"input": 1.25, "output": 5.00},
+    "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+    # Default fallback
+    "default": {"input": 0.075, "output": 0.30},
+}
+
+# EUR/USD exchange rate (approximate)
+EUR_USD_RATE = 1.05
+
+
+class CostTracker:
+    """
+    Singleton cost tracker for Gemini API usage.
+
+    Features:
+    - Tracks input/output tokens per request
+    - Calculates costs in EUR
+    - Persists monthly usage to JSON file
+    - Sends Telegram alerts at thresholds (50%, 80%, 95%, 100%)
+    - Can block requests when budget exceeded
+    """
+
+    _instance: Optional["CostTracker"] = None
+    _lock = threading.Lock()
+
+    def __new__(cls) -> "CostTracker":
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+
+        self._initialized = True
+
+        # Configuration from environment
+        self.monthly_budget_eur = float(os.getenv("GEMINI_MONTHLY_BUDGET_EUR", "30.0"))
+        self.data_dir = Path(os.getenv("COST_TRACKER_DATA_DIR", "/var/lib/api-ai"))
+        self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.telegram_chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+        self.block_on_budget_exceeded = os.getenv("BLOCK_ON_BUDGET_EXCEEDED", "true").lower() == "true"
+
+        # Alert thresholds (percentage of budget)
+        self.alert_thresholds = [50, 80, 95, 100]
+
+        # In-memory state
+        self._usage_data: dict = {}
+        self._alerts_sent: set = set()
+        self._data_lock = threading.Lock()
+
+        # Load existing data
+        self._load_data()
+
+        logger.info(
+            f"CostTracker initialized: budget={self.monthly_budget_eur}EUR, "
+            f"block_on_exceeded={self.block_on_budget_exceeded}"
+        )
+
+    @property
+    def data_file(self) -> Path:
+        """Get path to current month's data file."""
+        month_key = datetime.now().strftime("%Y-%m")
+        return self.data_dir / f"gemini_usage_{month_key}.json"
+
+    def _load_data(self) -> None:
+        """Load usage data from file."""
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            if self.data_file.exists():
+                with open(self.data_file, "r") as f:
+                    self._usage_data = json.load(f)
+                    self._alerts_sent = set(self._usage_data.get("alerts_sent", []))
+                logger.info(f"Loaded usage data: {self._usage_data.get('total_cost_eur', 0):.4f} EUR")
+            else:
+                self._reset_monthly_data()
+        except Exception as e:
+            logger.error(f"Failed to load usage data: {e}")
+            self._reset_monthly_data()
+
+    def _save_data(self) -> None:
+        """Save usage data to file."""
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self._usage_data["alerts_sent"] = list(self._alerts_sent)
+            self._usage_data["last_updated"] = datetime.now().isoformat()
+            with open(self.data_file, "w") as f:
+                json.dump(self._usage_data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save usage data: {e}")
+
+    def _reset_monthly_data(self) -> None:
+        """Reset data for new month."""
+        self._usage_data = {
+            "month": datetime.now().strftime("%Y-%m"),
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cost_usd": 0.0,
+            "total_cost_eur": 0.0,
+            "request_count": 0,
+            "by_model": {},
+            "alerts_sent": [],
+            "created_at": datetime.now().isoformat(),
+        }
+        self._alerts_sent = set()
+
+    def _calculate_cost(self, model: str, input_tokens: int, output_tokens: int) -> tuple[float, float]:
+        """
+        Calculate cost in USD and EUR.
+
+        Returns:
+            Tuple of (cost_usd, cost_eur)
+        """
+        pricing = PRICING.get(model, PRICING["default"])
+        cost_usd = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+        cost_eur = cost_usd / EUR_USD_RATE
+        return cost_usd, cost_eur
+
+    def track_usage(self, model: str, input_tokens: int, output_tokens: int) -> None:
+        """
+        Track token usage for a request.
+
+        Args:
+            model: Model name (e.g., "gemini-2.0-flash-exp")
+            input_tokens: Number of input tokens
+            output_tokens: Number of output tokens
+        """
+        if input_tokens == 0 and output_tokens == 0:
+            return
+
+        cost_usd, cost_eur = self._calculate_cost(model, input_tokens, output_tokens)
+
+        with self._data_lock:
+            # Check if we need to reset for new month
+            current_month = datetime.now().strftime("%Y-%m")
+            if self._usage_data.get("month") != current_month:
+                self._reset_monthly_data()
+
+            # Update totals
+            self._usage_data["total_input_tokens"] += input_tokens
+            self._usage_data["total_output_tokens"] += output_tokens
+            self._usage_data["total_cost_usd"] += cost_usd
+            self._usage_data["total_cost_eur"] += cost_eur
+            self._usage_data["request_count"] += 1
+
+            # Update by-model stats
+            if model not in self._usage_data["by_model"]:
+                self._usage_data["by_model"][model] = {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_usd": 0.0,
+                    "cost_eur": 0.0,
+                    "request_count": 0,
+                }
+            self._usage_data["by_model"][model]["input_tokens"] += input_tokens
+            self._usage_data["by_model"][model]["output_tokens"] += output_tokens
+            self._usage_data["by_model"][model]["cost_usd"] += cost_usd
+            self._usage_data["by_model"][model]["cost_eur"] += cost_eur
+            self._usage_data["by_model"][model]["request_count"] += 1
+
+            # Save to disk
+            self._save_data()
+
+            # Check thresholds and send alerts
+            self._check_thresholds()
+
+        logger.debug(
+            f"Tracked: {model} - {input_tokens}in/{output_tokens}out = "
+            f"{cost_eur:.6f}EUR (total: {self._usage_data['total_cost_eur']:.4f}EUR)"
+        )
+
+    def _check_thresholds(self) -> None:
+        """Check if any alert thresholds have been crossed."""
+        current_cost = self._usage_data["total_cost_eur"]
+        percentage = (current_cost / self.monthly_budget_eur) * 100
+
+        for threshold in self.alert_thresholds:
+            if percentage >= threshold and threshold not in self._alerts_sent:
+                self._alerts_sent.add(threshold)
+                self._send_alert(threshold, current_cost, percentage)
+
+    def _send_alert(self, threshold: int, current_cost: float, percentage: float) -> None:
+        """Send Telegram alert for threshold."""
+        if not self.telegram_bot_token or not self.telegram_chat_id:
+            logger.warning(f"Telegram not configured, skipping alert for {threshold}%")
+            return
+
+        # Determine emoji and urgency
+        if threshold >= 100:
+            emoji = "🚨"
+            status = "BUDGET EXCEEDED"
+        elif threshold >= 95:
+            emoji = "⚠️"
+            status = "CRITICAL"
+        elif threshold >= 80:
+            emoji = "🔶"
+            status = "WARNING"
+        else:
+            emoji = "📊"
+            status = "INFO"
+
+        message = f"""
+{emoji} <b>Gemini API Cost Alert - {status}</b>
+
+<b>Threshold:</b> {threshold}% reached
+<b>Current Cost:</b> {current_cost:.2f} EUR
+<b>Monthly Budget:</b> {self.monthly_budget_eur:.2f} EUR
+<b>Usage:</b> {percentage:.1f}%
+
+<b>Details:</b>
+- Requests: {self._usage_data['request_count']}
+- Input Tokens: {self._usage_data['total_input_tokens']:,}
+- Output Tokens: {self._usage_data['total_output_tokens']:,}
+
+<b>Remaining:</b> {max(0, self.monthly_budget_eur - current_cost):.2f} EUR
+"""
+
+        if threshold >= 100 and self.block_on_budget_exceeded:
+            message += "\n<b>⛔ New requests will be BLOCKED until next month!</b>"
+
+        self._send_telegram_message(message.strip())
+        logger.warning(f"Alert sent: {threshold}% threshold - {current_cost:.2f}EUR")
+
+    def _send_telegram_message(self, message: str) -> None:
+        """Send message via Telegram Bot API."""
+        try:
+            url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
+            payload = {
+                "chat_id": self.telegram_chat_id,
+                "text": message,
+                "parse_mode": "HTML",
+            }
+            with httpx.Client(timeout=10.0) as client:
+                response = client.post(url, json=payload)
+                if response.status_code != 200:
+                    logger.error(f"Telegram API error: {response.text}")
+        except Exception as e:
+            logger.error(f"Failed to send Telegram message: {e}")
+
+    def is_budget_exceeded(self) -> bool:
+        """Check if monthly budget is exceeded."""
+        return self._usage_data.get("total_cost_eur", 0) >= self.monthly_budget_eur
+
+    def should_block_request(self) -> bool:
+        """Check if request should be blocked due to budget."""
+        return self.block_on_budget_exceeded and self.is_budget_exceeded()
+
+    def get_status(self) -> dict:
+        """Get current usage status."""
+        with self._data_lock:
+            current_cost = self._usage_data.get("total_cost_eur", 0)
+            return {
+                "month": self._usage_data.get("month"),
+                "total_cost_eur": round(current_cost, 4),
+                "total_cost_usd": round(self._usage_data.get("total_cost_usd", 0), 4),
+                "monthly_budget_eur": self.monthly_budget_eur,
+                "usage_percentage": round((current_cost / self.monthly_budget_eur) * 100, 2),
+                "remaining_eur": round(max(0, self.monthly_budget_eur - current_cost), 4),
+                "request_count": self._usage_data.get("request_count", 0),
+                "total_input_tokens": self._usage_data.get("total_input_tokens", 0),
+                "total_output_tokens": self._usage_data.get("total_output_tokens", 0),
+                "budget_exceeded": self.is_budget_exceeded(),
+                "requests_blocked": self.should_block_request(),
+                "by_model": self._usage_data.get("by_model", {}),
+                "alerts_sent": list(self._alerts_sent),
+                "last_updated": self._usage_data.get("last_updated"),
+            }
+
+    def send_daily_report(self) -> None:
+        """Send daily usage report via Telegram."""
+        status = self.get_status()
+
+        message = f"""
+📊 <b>Gemini API Daily Report</b>
+
+<b>Month:</b> {status['month']}
+<b>Cost:</b> {status['total_cost_eur']:.2f} EUR / {status['monthly_budget_eur']:.2f} EUR
+<b>Usage:</b> {status['usage_percentage']:.1f}%
+<b>Remaining:</b> {status['remaining_eur']:.2f} EUR
+
+<b>Statistics:</b>
+- Requests: {status['request_count']:,}
+- Input Tokens: {status['total_input_tokens']:,}
+- Output Tokens: {status['total_output_tokens']:,}
+
+<b>Status:</b> {'⛔ BLOCKED' if status['requests_blocked'] else '✅ Active'}
+"""
+        self._send_telegram_message(message.strip())
+
+
+# Global singleton instance
+cost_tracker = CostTracker()

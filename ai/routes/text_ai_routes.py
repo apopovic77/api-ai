@@ -236,10 +236,13 @@ async def gemini_endpoint(
     - Alternative models: gemini-2.5-pro, gemini-2.5-flash-lite
     - Multimodal capabilities (vision support)
     - Note: All Gemini 1.x models are retired
+    - Cost tracking with monthly budget limit (default: 30 EUR)
 
     Accepts:
     - Simple string prompt: {"prompt": "your text"}
     - Vision prompt: {"prompt": {"text": "describe this", "images": ["base64..."]}}
+
+    Returns 429 if monthly budget is exceeded.
     """
     try:
         import google.generativeai as genai
@@ -247,6 +250,15 @@ async def gemini_endpoint(
         import base64
         from PIL import Image
         import io
+        from ..services.cost_tracker import cost_tracker
+
+        # Check budget before processing
+        if cost_tracker.should_block_request():
+            status = cost_tracker.get_status()
+            raise HTTPException(
+                status_code=429,
+                detail=f"Monthly Gemini API budget exceeded: {status['total_cost_eur']:.2f}/{status['monthly_budget_eur']:.2f} EUR. Requests blocked until next month."
+            )
 
         # Configure Gemini API
         gemini_key = os.getenv("GOOGLE_API_KEY")
@@ -291,10 +303,26 @@ async def gemini_endpoint(
         # Generate response
         response = gemini_model.generate_content(content_parts)
 
+        # Extract token usage from usage_metadata
+        tokens_used = None
+        input_tokens = 0
+        output_tokens = 0
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
+            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) or 0
+            tokens_used = input_tokens + output_tokens
+
+        # Track usage for cost monitoring
+        cost_tracker.track_usage(
+            model=model_name,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens
+        )
+
         return AIResponse(
             response=response.text,
             model=f"{model_name}-vision" if images_data else model_name,
-            tokens_used=None,  # Gemini doesn't provide token count directly
+            tokens_used=tokens_used,
             finish_reason="stop"
         )
     except Exception as e:
@@ -303,6 +331,92 @@ async def gemini_endpoint(
         logger.error(f"Gemini error: {error_msg}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+@router.get("/gemini/cost-status")
+async def gemini_cost_status():
+    """
+    Get current Gemini API cost tracking status.
+
+    Returns:
+    - Current month's usage and costs
+    - Budget information
+    - Whether requests are blocked
+    """
+    from ..services.cost_tracker import cost_tracker
+    return cost_tracker.get_status()
+
+
+@router.post("/gemini/send-report")
+async def gemini_send_report():
+    """
+    Manually trigger a daily report via Telegram.
+    """
+    from ..services.cost_tracker import cost_tracker
+    cost_tracker.send_daily_report()
+    return {"status": "Report sent"}
+
+
+@router.post("/gemini/gcp-budget-webhook")
+async def gcp_budget_webhook(request):
+    """
+    Webhook endpoint for GCP Budget Pub/Sub push notifications.
+
+    Configure in GCP:
+    1. Create Push Subscription on gemini-budget-alerts Topic
+    2. Endpoint URL: https://api-ai.arkturian.com/ai/gemini/gcp-budget-webhook
+
+    This is a BACKUP alert system with ~24h delay.
+    Primary alerting is done via real-time token tracking.
+    """
+    import base64
+    import json
+    from starlette.requests import Request
+    from ..services.cost_tracker import cost_tracker
+
+    try:
+        body = await request.json()
+
+        # Decode Pub/Sub message
+        message_data = body.get("message", {}).get("data", "")
+        if message_data:
+            decoded = base64.b64decode(message_data).decode()
+            budget_data = json.loads(decoded)
+
+            budget_name = budget_data.get("budgetDisplayName", "Unknown")
+            cost_amount = budget_data.get("costAmount", 0)
+            budget_amount = budget_data.get("budgetAmount", 0)
+            threshold = budget_data.get("alertThresholdExceeded", 0) * 100
+
+            # Determine emoji and status
+            if threshold >= 100:
+                emoji = "🚨"
+                status = "GCP: BUDGET EXCEEDED"
+            elif threshold >= 80:
+                emoji = "⚠️"
+                status = "GCP: WARNING"
+            else:
+                emoji = "📊"
+                status = "GCP: INFO"
+
+            message = f"""
+{emoji} <b>{status}</b>
+
+<b>Budget:</b> {budget_name}
+<b>Threshold:</b> {threshold:.0f}%
+<b>GCP Cost:</b> ${cost_amount:.2f} / ${budget_amount:.2f}
+
+<i>Note: GCP data has ~24h delay</i>
+<i>Real-time status: /ai/gemini/cost-status</i>
+"""
+            cost_tracker._send_telegram_message(message.strip())
+            logger.info(f"GCP Budget webhook: {threshold}% threshold for {budget_name}")
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        logger.error(f"GCP Budget webhook error: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 @router.get("/models")
