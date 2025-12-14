@@ -1,23 +1,36 @@
-name: Deploy to Arkturian
+name: Deploy to Arkserver
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm deployment to arkserver'
+        required: true
+        default: ''
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate confirmation
+        if: ${{ github.event.inputs.confirm != 'deploy' }}
+        run: |
+          echo "❌ Deployment cancelled - confirmation not provided"
+          echo "You must type 'deploy' to confirm deployment to arkserver"
+          exit 1
+
   build-archive:
+    needs: validate
     runs-on: ubuntu-latest
     outputs:
-      artifact-name: deploy-archive
+      artifact-name: deploy-archive-arkserver
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Create deployment archive
         run: |
-          echo "📦 Creating deployment archive..."
+          echo "📦 Creating deployment archive for arkserver..."
           tar --warning=no-file-changed --ignore-failed-read -czf deploy.tar.gz \
             --exclude='.git' \
             --exclude='.devops' \
@@ -34,7 +47,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deploy-archive
+          name: deploy-archive-arkserver
           path: deploy.tar.gz
 
   deploy:
@@ -47,23 +60,24 @@ jobs:
         with:
           name: ${{ needs.build-archive.outputs.artifact-name }}
 
-      - name: Upload archive to arkturian.com
+      - name: Upload archive to arkserver
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          host: ${{ secrets.DEPLOY_HOST_ARKSERVER }}
+          username: ${{ secrets.DEPLOY_USER_ARKSERVER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY_ARKSERVER }}
+          port: ${{ secrets.DEPLOY_PORT_ARKSERVER || 22 }}
           source: "deploy.tar.gz"
           target: "/tmp/"
+          timeout: 120s
 
-      - name: Deploy to arkturian.com
+      - name: Deploy to arkserver
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          host: ${{ secrets.DEPLOY_HOST_ARKSERVER }}
+          username: ${{ secrets.DEPLOY_USER_ARKSERVER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY_ARKSERVER }}
+          port: ${{ secrets.DEPLOY_PORT_ARKSERVER || 22 }}
           script: |
             set -e
 
@@ -73,7 +87,7 @@ jobs:
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
             BACKUP_PATH="$BACKUP_DIR/${BACKUP_PREFIX}-${TIMESTAMP}"
 
-            echo "🎯 Deploy to: $DEPLOY_PATH"
+            echo "🎯 Deploy to: $DEPLOY_PATH (arkserver)"
 
             if [ -d "$DEPLOY_PATH" ]; then
               echo "💾 Creating backup..."
@@ -98,52 +112,18 @@ jobs:
             systemctl restart api-ai || echo "⚠️  Service restart may need manual intervention"
 
             echo "✅ Deployment completed successfully!"
-            echo "📁 Live at: https://api-ai.arkturian.com"
+            echo "📁 Live at: https://api-ai.arkserver.arkturian.com"
             echo "💾 Backup: $BACKUP_PATH"
 
       - name: Notify on success
         if: success()
         run: |
-          echo "✅ Deployment successful!"
-          echo "📍 Site: https://api-ai.arkturian.com"
+          echo "✅ Deployment to arkserver successful!"
+          echo "📍 Site: https://api-ai.arkserver.arkturian.com"
           echo "📦 Commit: ${{ github.sha }}"
 
       - name: Notify on failure
         if: failure()
         run: |
-          echo "❌ Deployment failed for commit ${{ github.sha }}"
+          echo "❌ Deployment to arkserver failed for commit ${{ github.sha }}"
           echo "Check logs above for details"
-
-  trigger-sdk-regeneration:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: success()
-
-    steps:
-      - name: Trigger TypeScript SDK regeneration
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: apopovic77/api-ai-typescript-sdk
-          event-type: openapi-updated
-
-      - name: Trigger C# SDK regeneration
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: apopovic77/api-ai-csharp-sdk
-          event-type: openapi-updated
-
-  trigger-e2e-tests:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: success()
-
-    steps:
-      - name: Trigger E2E tests
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: apopovic77/api-e2e-tests
-          event-type: api-ai-deployed
-          client-payload: '{"api": "ai", "sha": "${{ github.sha }}"}'
