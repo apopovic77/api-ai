@@ -87,12 +87,12 @@ async def claude_endpoint(
 
         logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars")
 
-        # Build CLI command
+        # Build CLI command with default model sonnet (cost-effective)
         cmd = ["claude", "-p", prompt_text, "--output-format", "json"]
 
-        # Add model if specified
-        if model:
-            cmd.extend(["--model", model])
+        # Add model - default to sonnet (günstig), user can override with opus/haiku
+        selected_model = model or "sonnet"
+        cmd.extend(["--model", selected_model])
 
         # Add system prompt if provided
         if prompt.system:
