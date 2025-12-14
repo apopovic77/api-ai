@@ -1,0 +1,35 @@
+# API-AI - arkturian.com Configuration
+# Production server on Linode
+
+server:
+  name: "arkturian"
+  type: "python-api"
+  host: "arkturian.com"
+  user: "root"
+  deploy_path: "/var/www/api-ai"
+
+service:
+  type: "systemd"
+  name: "api-ai"
+  port: 8002
+
+nginx:
+  enabled: true
+  server_name: "api-ai.arkturian.com"
+  port: 80
+
+environment:
+  OPENAI_API_KEY: "${OPENAI_API_KEY}"
+  GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+  HOST: "0.0.0.0"
+  PORT: "8002"
+
+python:
+  version: "3.11"
+  requirements: "requirements.txt"
+  venv_path: "venv"
+
+backup:
+  enabled: true
+  dir: "/var/backups"
+  prefix: "api-ai"

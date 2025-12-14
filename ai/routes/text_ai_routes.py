@@ -8,7 +8,7 @@ Endpoints for text-based AI models:
 - Gemini (Google)
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Union
 import logging
@@ -370,7 +370,7 @@ async def gemini_send_report():
 
 
 @router.post("/gemini/gcp-budget-webhook")
-async def gcp_budget_webhook(request):
+async def gcp_budget_webhook(request: Request):
     """
     Webhook endpoint for GCP Budget Pub/Sub push notifications.
 
@@ -383,7 +383,6 @@ async def gcp_budget_webhook(request):
     """
     import base64
     import json
-    from starlette.requests import Request
     from ..services.cost_tracker import cost_tracker
 
     try:
