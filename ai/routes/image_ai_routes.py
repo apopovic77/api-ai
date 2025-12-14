@@ -72,6 +72,15 @@ async def generate_image_endpoint(
         import uuid
         import base64
         from ai.clients.storage_client import save_file_and_record
+        from ai.services.cost_tracker import cost_tracker
+
+        # Check budget before processing
+        if cost_tracker.should_block_request():
+            status = cost_tracker.get_status()
+            raise HTTPException(
+                status_code=429,
+                detail=f"Monthly Gemini API budget exceeded: {status['total_cost_eur']:.2f}/{status['monthly_budget_eur']:.2f} EUR."
+            )
 
         # Determine which model to use - default to Nano Banana
         model_name = request.model or "gemini-2.5-flash-image"
@@ -144,6 +153,9 @@ async def generate_image_endpoint(
         )
 
         print(f"--- Image Gen: Saved image to storage object ID {saved_obj.id}")
+
+        # Track image generation cost
+        cost_tracker.track_image_generation(actual_model, num_images=1)
 
         return {
             "id": saved_obj.id,

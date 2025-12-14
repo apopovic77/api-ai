@@ -24,14 +24,29 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-# Gemini 2.0 Flash pricing (USD per 1M tokens)
+# Gemini pricing (USD per 1M tokens) - Updated Dec 2024
+# See: https://ai.google.dev/pricing
 PRICING = {
+    # Text Models
     "gemini-2.0-flash-exp": {"input": 0.075, "output": 0.30},
     "gemini-2.0-flash": {"input": 0.075, "output": 0.30},
     "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
     "gemini-2.5-pro": {"input": 1.25, "output": 5.00},
     "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
     "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+
+    # Image Generation Models (per image, not per token)
+    # Pricing: ~$0.02-0.04 per image for Imagen, estimate for Gemini image
+    "gemini-2.5-flash-image": {"per_image": 0.02},
+    "gemini-3-pro-image-preview": {"per_image": 0.04},
+    "imagen-4.0-generate-001": {"per_image": 0.03},
+
+    # Audio/STT - same token pricing as text models
+    # Note: Audio input is converted to tokens (~25 tokens/second of audio)
+    "gemini-1.5-flash-audio": {"input": 0.075, "output": 0.30},
+    "gemini-1.5-pro-audio": {"input": 1.25, "output": 5.00},
+    "gemini-2.0-flash-exp-audio": {"input": 0.075, "output": 0.30},
+
     # Default fallback
     "default": {"input": 0.075, "output": 0.30},
 }
@@ -199,9 +214,57 @@ class CostTracker:
             # Check thresholds and send alerts
             self._check_thresholds()
 
-        logger.debug(
+        logger.info(
             f"Tracked: {model} - {input_tokens}in/{output_tokens}out = "
             f"{cost_eur:.6f}EUR (total: {self._usage_data['total_cost_eur']:.4f}EUR)"
+        )
+
+    def track_image_generation(self, model: str, num_images: int = 1) -> None:
+        """
+        Track image generation costs.
+
+        Args:
+            model: Model name (e.g., "gemini-2.5-flash-image", "imagen-4.0-generate-001")
+            num_images: Number of images generated
+        """
+        pricing = PRICING.get(model, {})
+        per_image_cost = pricing.get("per_image", 0.03)  # Default $0.03 per image
+        cost_usd = per_image_cost * num_images
+        cost_eur = cost_usd / EUR_USD_RATE
+
+        with self._data_lock:
+            current_month = datetime.now().strftime("%Y-%m")
+            if self._usage_data.get("month") != current_month:
+                self._reset_monthly_data()
+
+            self._usage_data["total_cost_usd"] += cost_usd
+            self._usage_data["total_cost_eur"] += cost_eur
+            self._usage_data["request_count"] += 1
+
+            # Track images separately
+            if "total_images" not in self._usage_data:
+                self._usage_data["total_images"] = 0
+            self._usage_data["total_images"] += num_images
+
+            if model not in self._usage_data["by_model"]:
+                self._usage_data["by_model"][model] = {
+                    "images_generated": 0,
+                    "cost_usd": 0.0,
+                    "cost_eur": 0.0,
+                    "request_count": 0,
+                }
+            self._usage_data["by_model"][model]["images_generated"] = \
+                self._usage_data["by_model"][model].get("images_generated", 0) + num_images
+            self._usage_data["by_model"][model]["cost_usd"] += cost_usd
+            self._usage_data["by_model"][model]["cost_eur"] += cost_eur
+            self._usage_data["by_model"][model]["request_count"] += 1
+
+            self._save_data()
+            self._check_thresholds()
+
+        logger.info(
+            f"Tracked image: {model} - {num_images} images = "
+            f"{cost_eur:.4f}EUR (total: {self._usage_data['total_cost_eur']:.4f}EUR)"
         )
 
     def _check_thresholds(self) -> None:

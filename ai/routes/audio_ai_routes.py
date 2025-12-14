@@ -330,9 +330,18 @@ async def _transcribe_with_gemini(
     """Transcribe audio using Google Gemini"""
     import tempfile
     from pathlib import Path
+    from ai.services.cost_tracker import cost_tracker
 
     if not os.getenv("GOOGLE_API_KEY"):
         raise HTTPException(status_code=500, detail="Google API key not configured.")
+
+    # Check budget before processing
+    if cost_tracker.should_block_request():
+        status = cost_tracker.get_status()
+        raise HTTPException(
+            status_code=429,
+            detail=f"Monthly Gemini API budget exceeded: {status['total_cost_eur']:.2f}/{status['monthly_budget_eur']:.2f} EUR."
+        )
 
     try:
         import google.generativeai as genai
@@ -376,6 +385,27 @@ async def _transcribe_with_gemini(
                 raise HTTPException(status_code=500, detail="Gemini returned empty response.")
 
             transcription_text = response.text.strip()
+
+            # Track usage - extract token counts if available
+            input_tokens = 0
+            output_tokens = 0
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
+                output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) or 0
+                logger.info(f"Gemini STT tokens: {input_tokens}in/{output_tokens}out")
+
+            # Track with audio suffix for clarity
+            model_key = f"{model}-audio" if not model.endswith("-audio") else model
+            if input_tokens > 0 or output_tokens > 0:
+                cost_tracker.track_usage(model_key, input_tokens, output_tokens)
+            else:
+                # Estimate based on audio duration (~25 tokens/sec) + output
+                # Rough estimate: 1 minute audio ≈ 1500 tokens
+                audio_size_mb = len(data) / (1024 * 1024)
+                estimated_input = int(audio_size_mb * 5000)  # ~5000 tokens per MB
+                estimated_output = len(transcription_text) // 4  # ~4 chars per token
+                cost_tracker.track_usage(model_key, estimated_input, estimated_output)
+                logger.info(f"Gemini STT estimated tokens: {estimated_input}in/{estimated_output}out")
 
             logger.info(f"Gemini transcription completed: {len(transcription_text)} characters")
 
