@@ -8,7 +8,7 @@ Endpoints for text-based AI models:
 - Gemini (Google)
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Union
 import logging
@@ -58,84 +58,149 @@ async def claude_endpoint(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Claude AI endpoint (Anthropic)
+    Claude AI endpoint via Claude Code CLI (claude -p)
 
     Features:
-    - Claude 4.5 Sonnet (default) - Best coding & agentic capabilities
-    - Context window: up to 1M tokens (preview)
-    - Excellent at reasoning and analysis
-    - Strong safety guardrails
-    - Vision support (can analyze images)
+    - Uses logged-in Claude account (no API costs on your bill!)
+    - Claude Code in print mode (-p) for non-interactive use
+    - JSON output for token tracking
+    - Supports --model parameter (sonnet, opus, haiku)
+    - System prompt support via --system-prompt
+    - Cost tracking at /ai/claude/cost-status
+
+    Note: Costs shown are informational - uses your Claude subscription.
     """
+    import subprocess
+    import asyncio
+    import json as json_module
+    from ..services.claude_cost_tracker import claude_cost_tracker
+
     try:
-        from anthropic import Anthropic
-        import os
-        import base64
-
-        # Configure Anthropic API
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-        if not anthropic_key or anthropic_key == "placeholder":
-            raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
-
-        client = Anthropic(api_key=anthropic_key)
-
-        # Extract prompt text and images
+        # Extract prompt text
         prompt_text = ""
-        images_data = []
-
         if isinstance(prompt.prompt, str):
-            # Simple text prompt
             prompt_text = prompt.prompt
         else:
-            # Prompt with text + images
             prompt_text = prompt.prompt.text
             if prompt.prompt.images:
-                # Decode base64 images
-                for img_b64 in prompt.prompt.images:
-                    # Remove data:image/... prefix if present
-                    if ',' in img_b64:
-                        img_b64 = img_b64.split(',', 1)[1]
+                logger.warning("Claude CLI mode does not support images - ignoring images")
 
-                    images_data.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",  # Claude auto-detects format
-                            "data": img_b64
-                        }
-                    })
+        logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars")
 
-        # Build messages content
-        if images_data:
-            # Vision request: [text, image1, image2, ...]
-            content = [{"type": "text", "text": prompt_text}] + images_data
-        else:
-            # Text-only request
-            content = prompt_text
+        # Build CLI command
+        cmd = ["claude", "-p", prompt_text, "--output-format", "json"]
 
-        # Call Claude API
-        model_name = model or "claude-sonnet-4-5"  # Default to Claude 4.5 Sonnet (latest 2025)
-        message = client.messages.create(
-            model=model_name,
-            max_tokens=prompt.max_tokens or 1000,
-            temperature=prompt.temperature or 0.7,
-            messages=[
-                {"role": "user", "content": content}
-            ]
+        # Add model if specified
+        if model:
+            cmd.extend(["--model", model])
+
+        # Add system prompt if provided
+        if prompt.system:
+            cmd.extend(["--system-prompt", prompt.system])
+
+        # Call claude -p in subprocess
+        def run_claude_cli():
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout for longer prompts
+                env={**subprocess.os.environ, "NO_COLOR": "1"}
+            )
+            return result
+
+        result = await asyncio.to_thread(run_claude_cli)
+
+        if result.returncode != 0:
+            error_msg = result.stderr or "Unknown error from claude CLI"
+            logger.error(f"Claude CLI error: {error_msg}")
+            raise HTTPException(status_code=500, detail=f"Claude CLI error: {error_msg}")
+
+        raw_output = result.stdout.strip()
+
+        if not raw_output:
+            raise HTTPException(status_code=500, detail="Claude CLI returned empty response")
+
+        # Parse JSON response
+        try:
+            cli_response = json_module.loads(raw_output)
+        except json_module.JSONDecodeError as e:
+            logger.error(f"Failed to parse Claude CLI JSON: {e}")
+            # Fallback: treat as plain text
+            return AIResponse(
+                response=raw_output,
+                model="claude-cli",
+                tokens_used=None,
+                finish_reason="stop"
+            )
+
+        # Check for error
+        if cli_response.get("is_error"):
+            error_msg = cli_response.get("result", "Unknown error")
+            raise HTTPException(status_code=500, detail=f"Claude error: {error_msg}")
+
+        # Track usage
+        claude_cost_tracker.track_usage(cli_response)
+
+        # Extract response text
+        response_text = cli_response.get("result", "")
+
+        # Calculate total tokens
+        usage = cli_response.get("usage", {})
+        tokens_used = (
+            usage.get("input_tokens", 0) +
+            usage.get("output_tokens", 0) +
+            usage.get("cache_read_input_tokens", 0)
+        )
+
+        # Determine model used
+        model_usage = cli_response.get("modelUsage", {})
+        models_used = list(model_usage.keys())
+        model_name = models_used[0] if models_used else "claude-cli"
+
+        logger.info(
+            f"Claude CLI response: {len(response_text)} chars, "
+            f"${cli_response.get('total_cost_usd', 0):.4f}, "
+            f"{tokens_used} tokens"
         )
 
         return AIResponse(
-            response=message.content[0].text,
-            model=message.model,
-            tokens_used=message.usage.input_tokens + message.usage.output_tokens,
-            finish_reason=message.stop_reason
+            response=response_text,
+            model=model_name,
+            tokens_used=tokens_used,
+            finish_reason="stop"
         )
+
+    except subprocess.TimeoutExpired:
+        logger.error("Claude CLI timeout after 300 seconds")
+        raise HTTPException(status_code=504, detail="Claude CLI timeout - prompt may be too long")
+    except FileNotFoundError:
+        logger.error("Claude CLI not found - is 'claude' installed?")
+        raise HTTPException(status_code=500, detail="Claude CLI not installed on server")
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.error(f"Claude error: {error_msg}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+@router.get("/claude/cost-status")
+async def claude_cost_status():
+    """
+    Get current Claude CLI cost tracking status.
+
+    Returns:
+    - Current month's usage and costs
+    - Token breakdown by model
+    - Request statistics
+
+    Note: Costs are informational - Claude CLI uses your subscription.
+    """
+    from ..services.claude_cost_tracker import claude_cost_tracker
+    return claude_cost_tracker.get_status()
 
 
 @router.post("/chatgpt", response_model=AIResponse)
@@ -370,7 +435,7 @@ async def gemini_send_report():
 
 
 @router.post("/gemini/gcp-budget-webhook")
-async def gcp_budget_webhook(request):
+async def gcp_budget_webhook(request: Request):
     """
     Webhook endpoint for GCP Budget Pub/Sub push notifications.
 
@@ -383,7 +448,6 @@ async def gcp_budget_webhook(request):
     """
     import base64
     import json
-    from starlette.requests import Request
     from ..services.cost_tracker import cost_tracker
 
     try:
