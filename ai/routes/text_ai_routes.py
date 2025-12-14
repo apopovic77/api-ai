@@ -106,6 +106,11 @@ async def claude_endpoint(
             env["NO_COLOR"] = "1"
             env["HOME"] = "/root"  # Claude credentials are in /root/.claude
 
+            # IMPORTANT: Remove ANTHROPIC_API_KEY so Claude CLI uses OAuth credentials
+            # If ANTHROPIC_API_KEY is set (even to "placeholder"), Claude CLI will try
+            # to use it instead of the logged-in OAuth credentials
+            env.pop("ANTHROPIC_API_KEY", None)
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -117,33 +122,51 @@ async def claude_endpoint(
 
         result = await asyncio.to_thread(run_claude_cli)
 
-        if result.returncode != 0:
-            error_msg = result.stderr or "Unknown error from claude CLI"
-            logger.error(f"Claude CLI error: {error_msg}")
-            raise HTTPException(status_code=500, detail=f"Claude CLI error: {error_msg}")
+        # Log the result for debugging
+        logger.info(f"Claude CLI returncode: {result.returncode}")
+        logger.info(f"Claude CLI stdout length: {len(result.stdout) if result.stdout else 0}")
+        if result.stdout:
+            logger.info(f"Claude CLI stdout preview: {result.stdout[:500]}")
+        if result.stderr:
+            logger.info(f"Claude CLI stderr: {result.stderr[:200]}")
 
-        raw_output = result.stdout.strip()
+        raw_output = result.stdout.strip() if result.stdout else ""
 
-        if not raw_output:
+        # Claude CLI returns errors in JSON stdout with is_error: true
+        # So we need to parse JSON FIRST before checking returncode
+        if raw_output:
+            try:
+                cli_response = json_module.loads(raw_output)
+
+                # Check for error in JSON response (Claude returns is_error: true)
+                if cli_response.get("is_error"):
+                    error_msg = cli_response.get("result", "Unknown error")
+                    logger.error(f"Claude CLI error (from JSON): {error_msg}")
+                    raise HTTPException(status_code=500, detail=f"Claude error: {error_msg}")
+
+            except json_module.JSONDecodeError as e:
+                # Not valid JSON - check if it's a plain error
+                if result.returncode != 0:
+                    error_msg = result.stderr or raw_output or "Unknown error from claude CLI"
+                    logger.error(f"Claude CLI error (non-JSON): {error_msg}")
+                    raise HTTPException(status_code=500, detail=f"Claude CLI error: {error_msg}")
+
+                # Otherwise treat as plain text response (unusual but possible)
+                logger.warning(f"Claude CLI returned non-JSON output: {raw_output[:200]}")
+                return AIResponse(
+                    response=raw_output,
+                    model="claude-cli",
+                    tokens_used=None,
+                    finish_reason="stop"
+                )
+        else:
+            # No stdout - check stderr for errors
+            if result.returncode != 0:
+                error_msg = result.stderr or "Unknown error from claude CLI (empty response)"
+                logger.error(f"Claude CLI error (empty stdout): {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Claude CLI error: {error_msg}")
+
             raise HTTPException(status_code=500, detail="Claude CLI returned empty response")
-
-        # Parse JSON response
-        try:
-            cli_response = json_module.loads(raw_output)
-        except json_module.JSONDecodeError as e:
-            logger.error(f"Failed to parse Claude CLI JSON: {e}")
-            # Fallback: treat as plain text
-            return AIResponse(
-                response=raw_output,
-                model="claude-cli",
-                tokens_used=None,
-                finish_reason="stop"
-            )
-
-        # Check for error
-        if cli_response.get("is_error"):
-            error_msg = cli_response.get("result", "Unknown error")
-            raise HTTPException(status_code=500, detail=f"Claude error: {error_msg}")
 
         # Track usage
         claude_cost_tracker.track_usage(cli_response)
