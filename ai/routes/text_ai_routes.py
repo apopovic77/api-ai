@@ -402,22 +402,22 @@ async def chatgpt_cost_status():
     return codex_cost_tracker.get_status()
 
 
-@router.post("/gemini-cli", response_model=AIResponse)
-async def gemini_cli_endpoint(
+@router.post("/gemini", response_model=AIResponse)
+async def gemini_endpoint(
     prompt: Prompt,
     model: Optional[str] = None,
     api_key: str = Depends(get_api_key)
 ):
     """
-    Gemini CLI endpoint via Google Gemini CLI
+    Gemini endpoint via Google Gemini CLI
 
     Features:
-    - Uses free tier (60 req/min, 1000 req/day - no API costs!)
-    - Gemini 2.5 Pro with 1M token context
+    - Uses free tier (60 req/min, 1000 req/day - NO API costs!)
+    - Gemini 2.5 Flash-Lite with 1M token context
     - JSON output for token tracking
-    - Cost tracking at /ai/gemini-cli/cost-status
+    - Usage tracking at /ai/gemini/cost-status
 
-    Note: Uses Google's free tier - no API billing.
+    Note: Uses Google's free tier CLI - no API billing.
     """
     import subprocess
     import asyncio
@@ -549,167 +549,60 @@ async def gemini_cli_endpoint(
         raise HTTPException(status_code=500, detail=error_msg)
 
 
-@router.get("/gemini-cli/cost-status")
-async def gemini_cli_cost_status():
+@router.get("/gemini/cost-status")
+async def gemini_cost_status():
     """
-    Get current Gemini CLI cost tracking status.
+    Get current Gemini CLI usage tracking status.
 
     Returns:
-    - Current month's usage and costs
+    - Current month's usage and estimated costs
     - Token breakdown by model
     - Request statistics
 
-    Note: Costs are informational - Gemini CLI uses free tier.
+    Note: Costs are informational only - Gemini CLI uses free tier (no actual billing).
     """
     from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
     return gemini_cli_cost_tracker.get_status()
 
 
-@router.post("/gemini", response_model=AIResponse)
-async def gemini_endpoint(
-    prompt: Prompt,
-    model: Optional[str] = None,
-    api_key: str = Depends(get_api_key)
-):
-    """
-    Gemini endpoint (Google)
-
-    Features:
-    - Gemini 2.5 Flash (default) - Stable GA model, fast and cost-effective
-    - Alternative models: gemini-2.5-pro, gemini-2.5-flash-lite
-    - Multimodal capabilities (vision support)
-    - Note: All Gemini 1.x models are retired
-    - Cost tracking with monthly budget limit (default: 30 EUR)
-
-    Accepts:
-    - Simple string prompt: {"prompt": "your text"}
-    - Vision prompt: {"prompt": {"text": "describe this", "images": ["base64..."]}}
-
-    Returns 429 if monthly budget is exceeded.
-    """
-    try:
-        import google.generativeai as genai
-        import os
-        import base64
-        from PIL import Image
-        import io
-        from ..services.cost_tracker import cost_tracker
-
-        # Check budget before processing
-        if cost_tracker.should_block_request():
-            status = cost_tracker.get_status()
-            raise HTTPException(
-                status_code=429,
-                detail=f"Monthly Gemini API budget exceeded: {status['total_cost_eur']:.2f}/{status['monthly_budget_eur']:.2f} EUR. Requests blocked until next month."
-            )
-
-        # Configure Gemini API
-        gemini_key = os.getenv("GOOGLE_API_KEY")
-        if not gemini_key or gemini_key == "placeholder":
-            raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured")
-
-        genai.configure(api_key=gemini_key)
-
-        # Extract prompt text and images
-        prompt_text = ""
-        images_data = []
-
-        # Select model
-        model_name = model or 'gemini-2.5-flash'  # Default to Gemini 2.5 Flash
-        gemini_model = genai.GenerativeModel(model_name)
-
-        if isinstance(prompt.prompt, str):
-            # Simple text prompt
-            prompt_text = prompt.prompt
-        else:
-            # Vision prompt with text + images
-            prompt_text = prompt.prompt.text
-            if prompt.prompt.images:
-                # Decode base64 images
-                for img_b64 in prompt.prompt.images:
-                    # Remove data:image/... prefix if present
-                    if ',' in img_b64:
-                        img_b64 = img_b64.split(',', 1)[1]
-
-                    img_bytes = base64.b64decode(img_b64)
-                    img = Image.open(io.BytesIO(img_bytes))
-                    images_data.append(img)
-
-        # Build content parts
-        if images_data:
-            # Vision request: [text, image1, image2, ...]
-            content_parts = [prompt_text] + images_data
-        else:
-            # Text-only request
-            content_parts = [prompt_text]
-
-        # Generate response
-        response = gemini_model.generate_content(content_parts)
-
-        # Extract token usage from usage_metadata
-        tokens_used = None
-        input_tokens = 0
-        output_tokens = 0
-
-        # Debug log to see what we get from Gemini
-        logger.info(f"Gemini response type: {type(response)}")
-        logger.info(f"Has usage_metadata: {hasattr(response, 'usage_metadata')}")
-        if hasattr(response, 'usage_metadata'):
-            logger.info(f"usage_metadata: {response.usage_metadata}")
-
-        if hasattr(response, 'usage_metadata') and response.usage_metadata:
-            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
-            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) or 0
-            tokens_used = input_tokens + output_tokens
-            logger.info(f"Extracted tokens: input={input_tokens}, output={output_tokens}")
-
-        # Track usage for cost monitoring (even if 0, to count requests)
-        if input_tokens > 0 or output_tokens > 0:
-            cost_tracker.track_usage(
-                model=model_name,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens
-            )
-            logger.info(f"Tracked Gemini usage: {input_tokens}in/{output_tokens}out")
-        else:
-            logger.warning(f"No token info from Gemini - cannot track usage")
-
-        return AIResponse(
-            response=response.text,
-            model=f"{model_name}-vision" if images_data else model_name,
-            tokens_used=tokens_used,
-            finish_reason="stop"
-        )
-    except Exception as e:
-        import traceback
-        error_msg = f"{type(e).__name__}: {str(e)}"
-        logger.error(f"Gemini error: {error_msg}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=error_msg)
-
-
-@router.get("/gemini/cost-status")
-async def gemini_cost_status():
-    """
-    Get current Gemini API cost tracking status.
-
-    Returns:
-    - Current month's usage and costs
-    - Budget information
-    - Whether requests are blocked
-    """
-    from ..services.cost_tracker import cost_tracker
-    return cost_tracker.get_status()
-
-
 @router.post("/gemini/send-report")
 async def gemini_send_report():
     """
-    Manually trigger a daily report via Telegram.
+    Manually trigger a usage report via Telegram.
+
+    Note: Shows CLI usage statistics (no actual costs - free tier).
     """
-    from ..services.cost_tracker import cost_tracker
-    cost_tracker.send_daily_report()
-    return {"status": "Report sent"}
+    from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+
+    # Get status and send via Telegram
+    status = gemini_cli_cost_tracker.get_status()
+
+    import httpx
+    import os
+    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+
+    if telegram_token and telegram_chat:
+        message = f"""
+📊 <b>Gemini CLI Usage Report</b>
+
+<b>Month:</b> {status.get('month', 'N/A')}
+<b>Requests:</b> {status.get('request_count', 0):,}
+<b>Input Tokens:</b> {status.get('total_input_tokens', 0):,}
+<b>Output Tokens:</b> {status.get('total_output_tokens', 0):,}
+
+<b>Estimated Value:</b> ${status.get('total_cost_usd', 0):.4f} (if API)
+
+<i>Note: Gemini CLI uses free tier - no actual costs!</i>
+"""
+        try:
+            url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+            with httpx.Client(timeout=10.0) as client:
+                client.post(url, json={"chat_id": telegram_chat, "text": message.strip(), "parse_mode": "HTML"})
+        except Exception:
+            pass
+
+    return {"status": "Report sent", "usage": status}
 
 
 @router.post("/gemini/gcp-budget-webhook")
