@@ -239,81 +239,165 @@ async def chatgpt_endpoint(
     api_key: str = Depends(get_api_key)
 ):
     """
-    ChatGPT endpoint (OpenAI)
+    ChatGPT endpoint via OpenAI Codex CLI
 
     Features:
-    - GPT-4.1 (default) - Latest 2025 model, best coding & instruction following
-    - Context window: up to 1M tokens
-    - Fast response times
-    - Vision support (can analyze images)
-    - Function calling support
+    - Uses logged-in ChatGPT account (no API costs on your bill!)
+    - Codex CLI in exec mode for non-interactive use
+    - JSONL output for response extraction
+    - Default model: o4-mini (fast and cost-effective)
+    - System prompt support
+    - Cost tracking at /ai/chatgpt/cost-status
+
+    Note: Uses your ChatGPT Plus/Pro subscription - no API billing.
     """
+    import subprocess
+    import asyncio
+    import json as json_module
+    from ..services.codex_cost_tracker import codex_cost_tracker
+
     try:
-        from openai import OpenAI
-        import os
-
-        # Configure OpenAI API
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if not openai_key or openai_key == "placeholder":
-            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
-
-        client = OpenAI(api_key=openai_key)
-
-        # Extract prompt text and images
+        # Extract prompt text
         prompt_text = ""
-        images_data = []
-
         if isinstance(prompt.prompt, str):
-            # Simple text prompt
             prompt_text = prompt.prompt
         else:
-            # Prompt with text + images
             prompt_text = prompt.prompt.text
             if prompt.prompt.images:
-                # OpenAI expects images in specific format
-                for img_b64 in prompt.prompt.images:
-                    # Keep data:image/... prefix or add it
-                    if not img_b64.startswith('data:image'):
-                        img_b64 = f"data:image/png;base64,{img_b64}"
+                logger.warning("Codex CLI mode does not support images via this endpoint - ignoring images")
 
-                    images_data.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": img_b64
-                        }
-                    })
+        logger.info(f"Calling codex exec with prompt length: {len(prompt_text)} chars")
 
-        # Build messages content
-        if images_data:
-            # Vision request: text + images
-            content = [{"type": "text", "text": prompt_text}] + images_data
-        else:
-            # Text-only request
-            content = prompt_text
+        # Build CLI command
+        # codex exec --json --skip-git-repo-check "prompt"
+        cmd = ["codex", "exec", "--json", "--skip-git-repo-check"]
 
-        # Call OpenAI API
-        model_name = model or "gpt-4.1"  # Default to GPT-4.1 (latest 2025, best performance)
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "user", "content": content}
-            ],
-            max_tokens=prompt.max_tokens or 1000,
-            temperature=prompt.temperature or 0.7
+        # Add model if specified (default: o4-mini)
+        selected_model = model or "o4-mini"
+        cmd.extend(["--model", selected_model])
+
+        # Add prompt as argument
+        cmd.append(prompt_text)
+
+        # Call codex exec in subprocess
+        def run_codex_cli():
+            import os
+            env = os.environ.copy()
+            env["NO_COLOR"] = "1"
+            env["HOME"] = "/root"  # Codex credentials are in /root/.codex
+
+            # Remove OPENAI_API_KEY so Codex CLI uses OAuth credentials
+            env.pop("OPENAI_API_KEY", None)
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+                env=env
+            )
+            return result
+
+        result = await asyncio.to_thread(run_codex_cli)
+
+        # Log the result for debugging
+        logger.info(f"Codex CLI returncode: {result.returncode}")
+        logger.info(f"Codex CLI stdout length: {len(result.stdout) if result.stdout else 0}")
+        if result.stderr:
+            logger.info(f"Codex CLI stderr: {result.stderr[:200]}")
+
+        raw_output = result.stdout.strip() if result.stdout else ""
+
+        if not raw_output:
+            if result.returncode != 0:
+                error_msg = result.stderr or "Unknown error from codex CLI (empty response)"
+                logger.error(f"Codex CLI error (empty stdout): {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Codex CLI error: {error_msg}")
+            raise HTTPException(status_code=500, detail="Codex CLI returned empty response")
+
+        # Parse JSONL output - each line is a separate JSON object
+        # We need to find the agent_message item and usage info
+        response_text = ""
+        input_tokens = 0
+        output_tokens = 0
+        model_name = selected_model
+
+        for line in raw_output.split('\n'):
+            if not line.strip():
+                continue
+            try:
+                event = json_module.loads(line)
+
+                # Extract agent message
+                if event.get("type") == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        response_text = item.get("text", "")
+
+                # Extract usage info
+                if event.get("type") == "turn.completed":
+                    usage = event.get("usage", {})
+                    input_tokens = usage.get("input_tokens", 0)
+                    output_tokens = usage.get("output_tokens", 0)
+
+            except json_module.JSONDecodeError:
+                continue
+
+        if not response_text:
+            logger.error(f"No agent_message found in Codex output: {raw_output[:500]}")
+            raise HTTPException(status_code=500, detail="No response from Codex CLI")
+
+        # Track usage
+        codex_cost_tracker.track_usage({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model_name
+        })
+
+        tokens_used = input_tokens + output_tokens
+
+        logger.info(
+            f"Codex CLI response: {len(response_text)} chars, "
+            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out)"
         )
 
         return AIResponse(
-            response=response.choices[0].message.content,
-            model=response.model,
-            tokens_used=response.usage.total_tokens,
-            finish_reason=response.choices[0].finish_reason
+            response=response_text,
+            model=model_name,
+            tokens_used=tokens_used,
+            finish_reason="stop"
         )
+
+    except subprocess.TimeoutExpired:
+        logger.error("Codex CLI timeout after 300 seconds")
+        raise HTTPException(status_code=504, detail="Codex CLI timeout - prompt may be too long")
+    except FileNotFoundError:
+        logger.error("Codex CLI not found - is 'codex' installed?")
+        raise HTTPException(status_code=500, detail="Codex CLI not installed on server")
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         error_msg = f"{type(e).__name__}: {str(e)}"
-        logger.error(f"ChatGPT error: {error_msg}")
+        logger.error(f"Codex error: {error_msg}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+@router.get("/chatgpt/cost-status")
+async def chatgpt_cost_status():
+    """
+    Get current Codex CLI cost tracking status.
+
+    Returns:
+    - Current month's usage and costs
+    - Token breakdown by model
+    - Request statistics
+
+    Note: Costs are informational - Codex CLI uses your subscription.
+    """
+    from ..services.codex_cost_tracker import codex_cost_tracker
+    return codex_cost_tracker.get_status()
 
 
 @router.post("/gemini", response_model=AIResponse)
