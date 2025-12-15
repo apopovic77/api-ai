@@ -272,9 +272,11 @@ async def chatgpt_endpoint(
         # codex exec --json --skip-git-repo-check "prompt"
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check"]
 
-        # Add model if specified (default: o4-mini)
-        selected_model = model or "o4-mini"
-        cmd.extend(["--model", selected_model])
+        # Only add model if explicitly specified by user
+        # (ChatGPT subscription has limited model access, let Codex use its default)
+        selected_model = model  # None if not specified
+        if selected_model:
+            cmd.extend(["--model", selected_model])
 
         # Add prompt as argument
         cmd.append(prompt_text)
@@ -320,7 +322,7 @@ async def chatgpt_endpoint(
         response_text = ""
         input_tokens = 0
         output_tokens = 0
-        model_name = selected_model
+        model_name = selected_model or "codex-default"  # Track as codex-default if no model specified
 
         for line in raw_output.split('\n'):
             if not line.strip():
