@@ -447,6 +447,11 @@ async def gemini_cli_endpoint(
             env["NO_COLOR"] = "1"
             env["HOME"] = "/root"  # Gemini credentials are in /root
 
+            # Gemini CLI expects GEMINI_API_KEY, but we use GOOGLE_API_KEY
+            google_key = os.getenv("GOOGLE_API_KEY", "")
+            if google_key:
+                env["GEMINI_API_KEY"] = google_key
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
