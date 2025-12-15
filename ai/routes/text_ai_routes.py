@@ -402,6 +402,164 @@ async def chatgpt_cost_status():
     return codex_cost_tracker.get_status()
 
 
+@router.post("/gemini-cli", response_model=AIResponse)
+async def gemini_cli_endpoint(
+    prompt: Prompt,
+    model: Optional[str] = None,
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Gemini CLI endpoint via Google Gemini CLI
+
+    Features:
+    - Uses free tier (60 req/min, 1000 req/day - no API costs!)
+    - Gemini 2.5 Pro with 1M token context
+    - JSON output for token tracking
+    - Cost tracking at /ai/gemini-cli/cost-status
+
+    Note: Uses Google's free tier - no API billing.
+    """
+    import subprocess
+    import asyncio
+    import json as json_module
+    from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+
+    try:
+        # Extract prompt text
+        prompt_text = ""
+        if isinstance(prompt.prompt, str):
+            prompt_text = prompt.prompt
+        else:
+            prompt_text = prompt.prompt.text
+            if prompt.prompt.images:
+                logger.warning("Gemini CLI mode does not support images via this endpoint - ignoring images")
+
+        logger.info(f"Calling gemini CLI with prompt length: {len(prompt_text)} chars")
+
+        # Build CLI command
+        # gemini --output-format json "prompt"
+        cmd = ["gemini", "--output-format", "json", prompt_text]
+
+        # Call gemini in subprocess
+        def run_gemini_cli():
+            import os
+            env = os.environ.copy()
+            env["NO_COLOR"] = "1"
+            env["HOME"] = "/root"  # Gemini credentials are in /root
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+                env=env
+            )
+            return result
+
+        result = await asyncio.to_thread(run_gemini_cli)
+
+        # Log the result for debugging
+        logger.info(f"Gemini CLI returncode: {result.returncode}")
+        logger.info(f"Gemini CLI stdout length: {len(result.stdout) if result.stdout else 0}")
+        if result.stderr:
+            logger.info(f"Gemini CLI stderr: {result.stderr[:200]}")
+
+        raw_output = result.stdout.strip() if result.stdout else ""
+
+        if not raw_output:
+            if result.returncode != 0:
+                error_msg = result.stderr or "Unknown error from gemini CLI (empty response)"
+                logger.error(f"Gemini CLI error (empty stdout): {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Gemini CLI error: {error_msg}")
+            raise HTTPException(status_code=500, detail="Gemini CLI returned empty response")
+
+        # Parse JSON output
+        # Format: {"response": "...", "stats": {"models": {"gemini-2.5-flash-lite": {"tokens": {...}}}}}
+        try:
+            cli_response = json_module.loads(raw_output)
+        except json_module.JSONDecodeError as e:
+            logger.error(f"Failed to parse Gemini CLI JSON: {e}")
+            logger.error(f"Raw output: {raw_output[:500]}")
+            # Return raw output as response if JSON parsing fails
+            return AIResponse(
+                response=raw_output,
+                model="gemini-cli",
+                tokens_used=None,
+                finish_reason="stop"
+            )
+
+        # Extract response text
+        response_text = cli_response.get("response", "")
+
+        # Extract token info from stats
+        input_tokens = 0
+        output_tokens = 0
+        model_name = "gemini-cli"
+
+        stats = cli_response.get("stats", {})
+        models = stats.get("models", {})
+
+        # Get the first model from stats (usually gemini-2.5-flash-lite)
+        for m_name, m_data in models.items():
+            model_name = m_name
+            tokens = m_data.get("tokens", {})
+            input_tokens = tokens.get("prompt", 0)
+            output_tokens = tokens.get("candidates", 0)
+            break
+
+        # Track usage
+        gemini_cli_cost_tracker.track_usage({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model_name
+        })
+
+        tokens_used = input_tokens + output_tokens
+
+        logger.info(
+            f"Gemini CLI response: {len(response_text)} chars, "
+            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out)"
+        )
+
+        return AIResponse(
+            response=response_text,
+            model=model_name,
+            tokens_used=tokens_used,
+            finish_reason="stop"
+        )
+
+    except subprocess.TimeoutExpired:
+        logger.error("Gemini CLI timeout after 300 seconds")
+        raise HTTPException(status_code=504, detail="Gemini CLI timeout - prompt may be too long")
+    except FileNotFoundError:
+        logger.error("Gemini CLI not found - is 'gemini' installed?")
+        raise HTTPException(status_code=500, detail="Gemini CLI not installed on server")
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Gemini CLI error: {error_msg}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
+
+
+@router.get("/gemini-cli/cost-status")
+async def gemini_cli_cost_status():
+    """
+    Get current Gemini CLI cost tracking status.
+
+    Returns:
+    - Current month's usage and costs
+    - Token breakdown by model
+    - Request statistics
+
+    Note: Costs are informational - Gemini CLI uses free tier.
+    """
+    from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+    return gemini_cli_cost_tracker.get_status()
+
+
 @router.post("/gemini", response_model=AIResponse)
 async def gemini_endpoint(
     prompt: Prompt,
