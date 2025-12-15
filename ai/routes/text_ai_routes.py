@@ -723,10 +723,13 @@ async def gcp_budget_webhook(request: Request):
 
     This is a BACKUP alert system with ~24h delay.
     Primary alerting is done via real-time token tracking.
+
+    NOTE: Uses NotificationManager to limit alerts to max 1 per day.
     """
     import base64
     import json
     from ..services.cost_tracker import cost_tracker
+    from ..services.notification_manager import notification_manager
 
     try:
         body = await request.json()
@@ -741,6 +744,17 @@ async def gcp_budget_webhook(request: Request):
             cost_amount = budget_data.get("costAmount", 0)
             budget_amount = budget_data.get("budgetAmount", 0)
             threshold = budget_data.get("alertThresholdExceeded", 0) * 100
+
+            logger.info(f"GCP Budget webhook received: {threshold:.0f}% threshold for {budget_name}")
+
+            # Check if we can send notification (cooldown: 24h)
+            if not notification_manager.can_send("gcp_budget_alert"):
+                next_allowed = notification_manager.get_next_allowed("gcp_budget_alert")
+                logger.info(
+                    f"GCP Budget alert suppressed (cooldown). "
+                    f"Next allowed: {next_allowed.isoformat() if next_allowed else 'now'}"
+                )
+                return {"status": "ok", "notification": "suppressed_cooldown"}
 
             # Determine emoji and status
             if threshold >= 100:
@@ -764,13 +778,38 @@ async def gcp_budget_webhook(request: Request):
 <i>Real-time status: /ai/gemini/cost-status</i>
 """
             cost_tracker._send_telegram_message(message.strip())
-            logger.info(f"GCP Budget webhook: {threshold}% threshold for {budget_name}")
+            notification_manager.mark_sent("gcp_budget_alert")
+            logger.info(f"GCP Budget webhook: sent alert for {threshold:.0f}% threshold")
 
-        return {"status": "ok"}
+        return {"status": "ok", "notification": "sent"}
 
     except Exception as e:
         logger.error(f"GCP Budget webhook error: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@router.get("/notifications/status")
+async def get_notification_status():
+    """
+    Get notification manager status.
+
+    Shows cooldown state for all notification types.
+    """
+    from ..services.notification_manager import notification_manager
+    return notification_manager.get_status()
+
+
+@router.post("/notifications/reset/{notification_type}")
+async def reset_notification_cooldown(notification_type: str):
+    """
+    Reset cooldown for a specific notification type.
+
+    Args:
+        notification_type: Type to reset (e.g., "gcp_budget_alert")
+    """
+    from ..services.notification_manager import notification_manager
+    notification_manager.reset(notification_type)
+    return {"status": "reset", "notification_type": notification_type}
 
 
 @router.get("/models")
