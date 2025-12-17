@@ -178,12 +178,30 @@ jobs:
             set -euo pipefail
             echo "=== Deploying api-ai to aiserver.oneal.eu via jump host ==="
 
-            # Transfer archive to aiserver
-            scp -o StrictHostKeyChecking=no -i /root/.ssh/oneal_aiserver /tmp/deploy.tar.gz gsgbot@aiserver.oneal.eu:/tmp/
-            rm -f /tmp/deploy.tar.gz
+            # Debug: Check where the archive is
+            echo "Checking for archive..."
+            ls -la /tmp/deploy* 2>/dev/null || echo "No deploy files in /tmp"
+
+            # Find and use the archive
+            ARCHIVE=$(find /tmp -name "deploy.tar.gz" 2>/dev/null | head -1)
+            if [ -z "$ARCHIVE" ]; then
+              echo "Archive not found, checking home dir..."
+              ARCHIVE=$(find ~ -name "deploy.tar.gz" 2>/dev/null | head -1)
+            fi
+
+            if [ -z "$ARCHIVE" ]; then
+              echo "ERROR: Could not find deploy.tar.gz"
+              exit 1
+            fi
+
+            echo "Found archive at: $ARCHIVE"
+
+            # Transfer archive to aiserver (use user's SSH key)
+            scp -o StrictHostKeyChecking=no -i ~/.ssh/oneal_aiserver "$ARCHIVE" gsgbot@aiserver.oneal.eu:/tmp/deploy.tar.gz
+            rm -f "$ARCHIVE"
 
             # SSH to aiserver and deploy
-            ssh -o StrictHostKeyChecking=no -i /root/.ssh/oneal_aiserver gsgbot@aiserver.oneal.eu << 'DEPLOY_SCRIPT'
+            ssh -o StrictHostKeyChecking=no -i ~/.ssh/oneal_aiserver gsgbot@aiserver.oneal.eu << 'DEPLOY_SCRIPT'
             set -euo pipefail
 
             DEPLOY_PATH="/var/code/api-ai"
