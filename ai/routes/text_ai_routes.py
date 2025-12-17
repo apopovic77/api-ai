@@ -101,10 +101,13 @@ async def claude_endpoint(
         # Call claude -p in subprocess
         def run_claude_cli():
             import os
-            # Create env with HOME=/root for Claude credentials
+            import pwd
+            # Create env with HOME for Claude credentials
+            # Use CLI_HOME env var, or detect from current user (gsgbot on aiserver, root on arkturian)
             env = os.environ.copy()
             env["NO_COLOR"] = "1"
-            env["HOME"] = "/root"  # Claude credentials are in /root/.claude
+            cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+            env["HOME"] = cli_home
 
             # IMPORTANT: Remove ANTHROPIC_API_KEY so Claude CLI uses OAuth credentials
             # If ANTHROPIC_API_KEY is set (even to "placeholder"), Claude CLI will try
@@ -284,9 +287,11 @@ async def chatgpt_endpoint(
         # Call codex exec in subprocess
         def run_codex_cli():
             import os
+            import pwd
             env = os.environ.copy()
             env["NO_COLOR"] = "1"
-            env["HOME"] = "/root"  # Codex credentials are in /root/.codex
+            cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+            env["HOME"] = cli_home
 
             # Remove OPENAI_API_KEY so Codex CLI uses OAuth credentials
             env.pop("OPENAI_API_KEY", None)
@@ -443,9 +448,11 @@ async def gemini_endpoint(
         # Call gemini in subprocess
         def run_gemini_cli():
             import os
+            import pwd
             env = os.environ.copy()
             env["NO_COLOR"] = "1"
-            env["HOME"] = "/root"  # Gemini credentials are in /root
+            cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+            env["HOME"] = cli_home
 
             # Gemini CLI expects GEMINI_API_KEY, but we use GOOGLE_API_KEY
             google_key = os.getenv("GOOGLE_API_KEY", "")
