@@ -1,12 +1,24 @@
-name: Deploy to Arkturian
+name: Deploy AI API
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      deploy_arkturian:
+        description: 'Deploy to arkturian.com'
+        type: boolean
+        default: true
+      deploy_aiserver:
+        description: 'Deploy to aiserver.oneal.eu'
+        type: boolean
+        default: true
 
 jobs:
+  # ============================================================================
+  # Build archive (shared by all deployments)
+  # ============================================================================
   build-archive:
     runs-on: ubuntu-latest
     outputs:
@@ -37,9 +49,21 @@ jobs:
           name: deploy-archive
           path: deploy.tar.gz
 
-  deploy:
+  # ============================================================================
+  # PRODUCTION: arkturian.com (api-ai.arkturian.com)
+  # ============================================================================
+  deploy-arkturian:
+    name: Deploy to arkturian.com
     needs: build-archive
+    if: |
+      vars.ENABLE_ARKTURIAN_DEPLOY == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'workflow_dispatch' || inputs.deploy_arkturian)
     runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api-ai.arkturian.com
 
     steps:
       - name: Download artifact
@@ -91,33 +115,112 @@ jobs:
 
             echo "📦 Installing Python dependencies..."
             cd "$DEPLOY_PATH"
-            python3 -m pip install --upgrade pip --break-system-packages || python3 -m pip install --upgrade pip
-            python3 -m pip install --break-system-packages -r requirements.txt || python3 -m pip install -r requirements.txt
+
+            # Use pyenv Python if available
+            if [ -f ~/.pyenv/versions/3.11.9/bin/python3.11 ]; then
+              rm -rf venv
+              ~/.pyenv/versions/3.11.9/bin/python3.11 -m venv venv
+              source venv/bin/activate
+            fi
+
+            pip install --upgrade pip
+            pip install -r requirements.txt
 
             echo "🔄 Restarting API service..."
             systemctl restart api-ai || echo "⚠️  Service restart may need manual intervention"
 
+            sleep 3
+            curl -fsS --max-time 10 http://127.0.0.1:8003/health
+
             echo "✅ Deployment completed successfully!"
-            echo "📁 Live at: https://api-ai.arkturian.com"
-            echo "💾 Backup: $BACKUP_PATH"
 
-      - name: Notify on success
-        if: success()
-        run: |
-          echo "✅ Deployment successful!"
-          echo "📍 Site: https://api-ai.arkturian.com"
-          echo "📦 Commit: ${{ github.sha }}"
-
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "❌ Deployment failed for commit ${{ github.sha }}"
-          echo "Check logs above for details"
-
-  trigger-sdk-regeneration:
-    needs: deploy
+  # ============================================================================
+  # O'NEAL: aiserver.oneal.eu (via arkturian.com jump host)
+  # ============================================================================
+  deploy-aiserver:
+    name: Deploy to aiserver.oneal.eu
+    needs: build-archive
+    if: |
+      vars.ENABLE_AISERVER_DEPLOY == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'workflow_dispatch' || inputs.deploy_aiserver)
     runs-on: ubuntu-latest
-    if: success()
+    environment:
+      name: oneal
+      url: https://gsgbot.arkturian.com
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-archive.outputs.artifact-name }}
+
+      - name: Upload archive via jump host
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_DEPLOY_HOST }}
+          username: ${{ secrets.PROD_DEPLOY_USER }}
+          key: ${{ secrets.PROD_DEPLOY_SSH_KEY }}
+          port: ${{ secrets.PROD_DEPLOY_PORT || 22 }}
+          source: "deploy.tar.gz"
+          target: "/tmp/"
+
+      - name: Deploy via arkturian.com jump host
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_DEPLOY_HOST }}
+          port: ${{ secrets.PROD_DEPLOY_PORT }}
+          username: ${{ secrets.PROD_DEPLOY_USER }}
+          key: ${{ secrets.PROD_DEPLOY_SSH_KEY }}
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            echo "=== Deploying api-ai to aiserver.oneal.eu via jump host ==="
+
+            # Transfer archive to aiserver
+            scp -o StrictHostKeyChecking=no -i /root/.ssh/oneal_aiserver /tmp/deploy.tar.gz gsgbot@aiserver.oneal.eu:/tmp/
+            rm -f /tmp/deploy.tar.gz
+
+            # SSH to aiserver and deploy
+            ssh -o StrictHostKeyChecking=no -i /root/.ssh/oneal_aiserver gsgbot@aiserver.oneal.eu << 'DEPLOY_SCRIPT'
+            set -euo pipefail
+
+            DEPLOY_PATH="/var/code/api-ai"
+
+            echo "=== Extracting archive ==="
+            cd "$DEPLOY_PATH"
+
+            # Keep venv and .env
+            tar -xzf /tmp/deploy.tar.gz --exclude='.env'
+            rm -f /tmp/deploy.tar.gz
+
+            echo "=== Installing dependencies ==="
+            source venv/bin/activate
+            pip install --upgrade pip
+            pip install --no-cache-dir -r requirements.txt
+
+            echo "=== Restarting service ==="
+            sudo systemctl restart api-ai.service
+            sleep 3
+
+            echo "=== Health check ==="
+            curl -fsS --max-time 10 http://127.0.0.1:8003/health
+            echo ""
+            echo "=== Deployment complete ==="
+            DEPLOY_SCRIPT
+
+  # ============================================================================
+  # SDK Regeneration (after all deployments)
+  # ============================================================================
+  trigger-sdk-regeneration:
+    name: Trigger SDK Regeneration
+    needs: [deploy-arkturian, deploy-aiserver]
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      (needs.deploy-arkturian.result == 'success' || needs.deploy-aiserver.result == 'success')
+    runs-on: ubuntu-latest
 
     steps:
       - name: Trigger TypeScript SDK regeneration
@@ -133,17 +236,3 @@ jobs:
           token: ${{ secrets.PAT_TOKEN }}
           repository: apopovic77/api-ai-csharp-sdk
           event-type: openapi-updated
-
-  trigger-e2e-tests:
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: success()
-
-    steps:
-      - name: Trigger E2E tests
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: apopovic77/api-e2e-tests
-          event-type: api-ai-deployed
-          client-payload: '{"api": "ai", "sha": "${{ github.sha }}"}'
