@@ -151,20 +151,8 @@ jobs:
       url: https://gsgbot.arkturian.com
 
     steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build-archive.outputs.artifact-name }}
-
-      - name: Upload archive via jump host
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
-          source: "deploy.tar.gz"
-          target: "/tmp/"
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Deploy via arkturian.com jump host
         uses: appleboy/ssh-action@v1.0.3
@@ -178,40 +166,18 @@ jobs:
             set -euo pipefail
             echo "=== Deploying api-ai to aiserver.oneal.eu via jump host ==="
 
-            # Debug: Check where the archive is
-            echo "Checking for archive..."
-            ls -la /tmp/deploy* 2>/dev/null || echo "No deploy files in /tmp"
-
-            # Find and use the archive
-            ARCHIVE=$(find /tmp -name "deploy.tar.gz" 2>/dev/null | head -1)
-            if [ -z "$ARCHIVE" ]; then
-              echo "Archive not found, checking home dir..."
-              ARCHIVE=$(find ~ -name "deploy.tar.gz" 2>/dev/null | head -1)
-            fi
-
-            if [ -z "$ARCHIVE" ]; then
-              echo "ERROR: Could not find deploy.tar.gz"
-              exit 1
-            fi
-
-            echo "Found archive at: $ARCHIVE"
-
-            # Transfer archive to aiserver (use user's SSH key)
-            scp -o StrictHostKeyChecking=no -i ~/.ssh/oneal_aiserver "$ARCHIVE" gsgbot@aiserver.oneal.eu:/tmp/deploy.tar.gz
-            rm -f "$ARCHIVE"
-
-            # SSH to aiserver and deploy
+            # SSH to aiserver and deploy via git
             ssh -o StrictHostKeyChecking=no -i ~/.ssh/oneal_aiserver gsgbot@aiserver.oneal.eu << 'DEPLOY_SCRIPT'
             set -euo pipefail
 
             DEPLOY_PATH="/var/code/api-ai"
 
-            echo "=== Extracting archive ==="
+            echo "=== Updating repository ==="
             cd "$DEPLOY_PATH"
-
-            # Keep venv and .env
-            tar -xzf /tmp/deploy.tar.gz --exclude='.env'
-            rm -f /tmp/deploy.tar.gz
+            git fetch origin
+            git clean -fd --exclude=venv --exclude=.env
+            git checkout -f main
+            git reset --hard origin/main
 
             echo "=== Installing dependencies ==="
             source venv/bin/activate
