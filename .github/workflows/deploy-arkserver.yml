@@ -1,26 +1,13 @@
 name: Deploy to Arkserver
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      confirm:
-        description: 'Type "deploy" to confirm deployment to arkserver'
-        required: true
-        default: ''
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate confirmation
-        if: ${{ github.event.inputs.confirm != 'deploy' }}
-        run: |
-          echo "❌ Deployment cancelled - confirmation not provided"
-          echo "You must type 'deploy' to confirm deployment to arkserver"
-          exit 1
-
   build-archive:
-    needs: validate
     runs-on: ubuntu-latest
     outputs:
       artifact-name: deploy-archive-arkserver
@@ -51,8 +38,15 @@ jobs:
           path: deploy.tar.gz
 
   deploy:
+    name: Deploy to arkserver
     needs: build-archive
+    if: |
+      vars.ENABLE_ARKSERVER_DEPLOY == 'true' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment:
+      name: arkserver
+      url: https://api-ai.arkserver.arkturian.com
 
     steps:
       - name: Download artifact
@@ -111,19 +105,19 @@ jobs:
             echo "🔄 Restarting API service..."
             systemctl restart api-ai || echo "⚠️  Service restart may need manual intervention"
 
-            echo "✅ Deployment completed successfully!"
-            echo "📁 Live at: https://api-ai.arkserver.arkturian.com"
-            echo "💾 Backup: $BACKUP_PATH"
+            sleep 3
+
+            echo "🏥 Health check..."
+            curl -fsS --max-time 10 http://127.0.0.1:8000/health || echo "⚠️  Health check failed"
+
+            echo "✅ Deployment to arkserver completed!"
 
       - name: Notify on success
         if: success()
         run: |
           echo "✅ Deployment to arkserver successful!"
           echo "📍 Site: https://api-ai.arkserver.arkturian.com"
-          echo "📦 Commit: ${{ github.sha }}"
 
       - name: Notify on failure
         if: failure()
-        run: |
-          echo "❌ Deployment to arkserver failed for commit ${{ github.sha }}"
-          echo "Check logs above for details"
+        run: echo "❌ Deployment to arkserver failed"
