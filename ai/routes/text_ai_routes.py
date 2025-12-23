@@ -269,6 +269,11 @@ async def chatgpt_endpoint(
             if prompt.prompt.images:
                 logger.warning("Codex CLI mode does not support images via this endpoint - ignoring images")
 
+        # Codex CLI has no --system-prompt, so prepend system prompt to user prompt
+        if prompt.system:
+            prompt_text = f"{prompt.system}\n\n{prompt_text}"
+            logger.info(f"Prepended system prompt ({len(prompt.system)} chars) to user prompt")
+
         logger.info(f"Calling codex exec with prompt length: {len(prompt_text)} chars")
 
         # Build CLI command
@@ -439,6 +444,11 @@ async def gemini_endpoint(
             if prompt.prompt.images:
                 logger.warning("Gemini CLI mode does not support images via this endpoint - ignoring images")
 
+        # Gemini CLI has no --system-prompt, so prepend system prompt to user prompt
+        if prompt.system:
+            prompt_text = f"{prompt.system}\n\n{prompt_text}"
+            logger.info(f"Prepended system prompt ({len(prompt.system)} chars) to user prompt")
+
         logger.info(f"Calling gemini CLI with prompt length: {len(prompt_text)} chars")
 
         # Build CLI command
@@ -570,6 +580,128 @@ async def gemini_cost_status():
     """
     from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
     return gemini_cli_cost_tracker.get_status()
+
+
+@router.post("/gemini/vision", response_model=AIResponse)
+async def gemini_vision_endpoint(
+    prompt: Prompt,
+    model: Optional[str] = None,
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Gemini Vision endpoint via Google Generative AI API.
+
+    Features:
+    - Supports multimodal input (text + images)
+    - Uses Gemini 2.0 Flash for vision tasks
+    - Base64 encoded images in prompt.images array
+    - Perfect for image analysis, safety checks, content moderation
+
+    Note: Uses GOOGLE_API_KEY from environment.
+    """
+    import os
+    import base64
+    import google.generativeai as genai
+    from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+
+    try:
+        # Get API key from environment
+        google_api_key = os.getenv("GOOGLE_API_KEY", "")
+        if not google_api_key:
+            raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured")
+
+        # Configure Gemini
+        genai.configure(api_key=google_api_key)
+
+        # Extract prompt text and images
+        prompt_text = ""
+        images_b64 = []
+
+        if isinstance(prompt.prompt, str):
+            prompt_text = prompt.prompt
+        else:
+            prompt_text = prompt.prompt.text
+            if prompt.prompt.images:
+                images_b64 = prompt.prompt.images
+
+        logger.info(f"Calling Gemini Vision API with prompt length: {len(prompt_text)} chars, images: {len(images_b64)}")
+
+        # Select model - use gemini-2.0-flash for vision (fast and capable)
+        model_name = model or "gemini-2.0-flash"
+        gemini_model = genai.GenerativeModel(model_name)
+
+        # Build content parts
+        content_parts = []
+
+        # Add images first (better for vision tasks)
+        for i, img_b64 in enumerate(images_b64):
+            try:
+                # Handle data URL format: "data:image/jpeg;base64,..."
+                if img_b64.startswith("data:"):
+                    # Extract mime type and base64 data
+                    header, b64_data = img_b64.split(",", 1)
+                    mime_type = header.split(":")[1].split(";")[0]
+                else:
+                    # Assume raw base64 JPEG
+                    b64_data = img_b64
+                    mime_type = "image/jpeg"
+
+                # Decode and create image part
+                image_data = base64.b64decode(b64_data)
+                content_parts.append({
+                    "mime_type": mime_type,
+                    "data": image_data
+                })
+                logger.info(f"Added image {i+1}: {mime_type}, {len(image_data)} bytes")
+            except Exception as e:
+                logger.warning(f"Failed to process image {i+1}: {e}")
+                continue
+
+        # Add text prompt
+        content_parts.append(prompt_text)
+
+        # Generate response
+        response = gemini_model.generate_content(content_parts)
+
+        # Extract response text
+        response_text = response.text if response.text else ""
+
+        # Extract token counts if available
+        input_tokens = 0
+        output_tokens = 0
+        if hasattr(response, 'usage_metadata'):
+            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
+            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
+
+        # Track usage
+        gemini_cli_cost_tracker.track_usage({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model_name
+        })
+
+        tokens_used = input_tokens + output_tokens
+
+        logger.info(
+            f"Gemini Vision response: {len(response_text)} chars, "
+            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out)"
+        )
+
+        return AIResponse(
+            response=response_text,
+            model=model_name,
+            tokens_used=tokens_used,
+            finish_reason="stop"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Gemini Vision error: {error_msg}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.post("/gemini/send-report")
