@@ -66,102 +66,34 @@ async def claude_endpoint(
     - JSON output for token tracking
     - Supports --model parameter (sonnet, opus, haiku)
     - System prompt support via --system-prompt
-    - Vision support via --image flag (URLs or local files)
     - Cost tracking at /ai/claude/cost-status
 
-    Note: Costs shown are informational - uses your Claude subscription.
+    Note: Claude CLI does NOT support images. For vision tasks, use /ai/gemini/vision instead.
     """
     import subprocess
     import asyncio
     import json as json_module
-    import tempfile
-    import os
-    import httpx
-    import base64
     from ..services.claude_cost_tracker import claude_cost_tracker
 
-    temp_files = []  # Track temp files for cleanup
-
     try:
-        # Extract prompt text and images
+        # Extract prompt text
         prompt_text = ""
-        image_paths = []
 
         if isinstance(prompt.prompt, str):
             prompt_text = prompt.prompt
         else:
             prompt_text = prompt.prompt.text
             if prompt.prompt.images:
-                logger.info(f"Processing {len(prompt.prompt.images)} images for Claude vision")
-                for idx, img_source in enumerate(prompt.prompt.images):
-                    try:
-                        # Check if it's a URL or base64
-                        if img_source.startswith('http://') or img_source.startswith('https://'):
-                            # Download image from URL
-                            logger.info(f"Downloading image {idx+1} from URL: {img_source[:100]}...")
-                            async with httpx.AsyncClient(timeout=30.0) as client:
-                                resp = await client.get(img_source)
-                                resp.raise_for_status()
-                                img_data = resp.content
+                # Claude CLI doesn't support images - log warning and continue with text only
+                logger.warning(
+                    f"Claude CLI does not support images - ignoring {len(prompt.prompt.images)} images. "
+                    f"Use /ai/gemini/vision for vision tasks."
+                )
 
-                                # Determine extension from content-type
-                                content_type = resp.headers.get('content-type', 'image/png')
-                                ext = '.png'
-                                if 'jpeg' in content_type or 'jpg' in content_type:
-                                    ext = '.jpg'
-                                elif 'webp' in content_type:
-                                    ext = '.webp'
-                                elif 'gif' in content_type:
-                                    ext = '.gif'
-
-                                # Save to temp file
-                                temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                                temp_file.write(img_data)
-                                temp_file.close()
-                                temp_files.append(temp_file.name)
-                                image_paths.append(temp_file.name)
-                                logger.info(f"Downloaded image to {temp_file.name} ({len(img_data)} bytes)")
-
-                        elif img_source.startswith('data:image'):
-                            # Base64 data URL
-                            header, b64_data = img_source.split(',', 1)
-                            img_data = base64.b64decode(b64_data)
-
-                            # Determine extension
-                            ext = '.png'
-                            if 'jpeg' in header or 'jpg' in header:
-                                ext = '.jpg'
-                            elif 'webp' in header:
-                                ext = '.webp'
-
-                            temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                            temp_file.write(img_data)
-                            temp_file.close()
-                            temp_files.append(temp_file.name)
-                            image_paths.append(temp_file.name)
-                            logger.info(f"Decoded base64 image to {temp_file.name}")
-
-                        else:
-                            # Assume raw base64 (no data: prefix)
-                            img_data = base64.b64decode(img_source)
-                            temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                            temp_file.write(img_data)
-                            temp_file.close()
-                            temp_files.append(temp_file.name)
-                            image_paths.append(temp_file.name)
-                            logger.info(f"Decoded raw base64 image to {temp_file.name}")
-
-                    except Exception as img_err:
-                        logger.warning(f"Failed to process image {idx+1}: {img_err}")
-
-        logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars, {len(image_paths)} images")
+        logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars")
 
         # Build CLI command with default model sonnet (cost-effective)
         cmd = ["claude", "-p", prompt_text, "--output-format", "json"]
-
-        # Add images using --image flag (vision support)
-        for img_path in image_paths:
-            cmd.extend(["--image", img_path])
 
         # Add model - default to sonnet (günstig), user can override with opus/haiku
         selected_model = model or "sonnet"
@@ -290,15 +222,6 @@ async def claude_endpoint(
         logger.error(f"Claude error: {error_msg}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_msg)
-    finally:
-        # Cleanup temp files
-        for temp_path in temp_files:
-            try:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                    logger.debug(f"Cleaned up temp file: {temp_path}")
-            except Exception as cleanup_err:
-                logger.warning(f"Failed to cleanup temp file {temp_path}: {cleanup_err}")
 
 
 @router.get("/claude/cost-status")
