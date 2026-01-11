@@ -130,7 +130,7 @@ jobs:
             systemctl restart api-ai || echo "⚠️  Service restart may need manual intervention"
 
             sleep 3
-            curl -fsS --max-time 10 http://127.0.0.1:8003/health
+            curl -fsS --max-time 10 http://127.0.0.1:8000/health
 
             echo "✅ Deployment completed successfully!"
 
