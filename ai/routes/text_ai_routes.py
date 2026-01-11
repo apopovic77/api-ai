@@ -156,16 +156,16 @@ async def claude_endpoint(
 
         logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars, {len(image_paths)} images")
 
-        # Build CLI command
+        # Build CLI command with default model sonnet (cost-effective)
         cmd = ["claude", "-p", prompt_text, "--output-format", "json"]
 
-        # Add images using --image flag
+        # Add images using --image flag (vision support)
         for img_path in image_paths:
             cmd.extend(["--image", img_path])
 
-        # Add model if specified
-        if model:
-            cmd.extend(["--model", model])
+        # Add model - default to sonnet (günstig), user can override with opus/haiku
+        selected_model = model or "sonnet"
+        cmd.extend(["--model", selected_model])
 
         # Add system prompt if provided
         if prompt.system:
@@ -173,44 +173,76 @@ async def claude_endpoint(
 
         # Call claude -p in subprocess
         def run_claude_cli():
+            import os
+            import pwd
+            # Create env with HOME for Claude credentials
+            # Use CLI_HOME env var, or detect from current user (gsgbot on aiserver, root on arkturian)
+            env = os.environ.copy()
+            env["NO_COLOR"] = "1"
+            cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+            env["HOME"] = cli_home
+
+            # IMPORTANT: Remove ANTHROPIC_API_KEY so Claude CLI uses OAuth credentials
+            # If ANTHROPIC_API_KEY is set (even to "placeholder"), Claude CLI will try
+            # to use it instead of the logged-in OAuth credentials
+            env.pop("ANTHROPIC_API_KEY", None)
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 minute timeout for longer prompts
-                env={**subprocess.os.environ, "NO_COLOR": "1"}
+                env=env
             )
             return result
 
         result = await asyncio.to_thread(run_claude_cli)
 
-        if result.returncode != 0:
-            error_msg = result.stderr or "Unknown error from claude CLI"
-            logger.error(f"Claude CLI error: {error_msg}")
-            raise HTTPException(status_code=500, detail=f"Claude CLI error: {error_msg}")
+        # Log the result for debugging
+        logger.info(f"Claude CLI returncode: {result.returncode}")
+        logger.info(f"Claude CLI stdout length: {len(result.stdout) if result.stdout else 0}")
+        if result.stdout:
+            logger.info(f"Claude CLI stdout preview: {result.stdout[:500]}")
+        if result.stderr:
+            logger.info(f"Claude CLI stderr: {result.stderr[:200]}")
 
-        raw_output = result.stdout.strip()
+        raw_output = result.stdout.strip() if result.stdout else ""
 
-        if not raw_output:
+        # Claude CLI returns errors in JSON stdout with is_error: true
+        # So we need to parse JSON FIRST before checking returncode
+        if raw_output:
+            try:
+                cli_response = json_module.loads(raw_output)
+
+                # Check for error in JSON response (Claude returns is_error: true)
+                if cli_response.get("is_error"):
+                    error_msg = cli_response.get("result", "Unknown error")
+                    logger.error(f"Claude CLI error (from JSON): {error_msg}")
+                    raise HTTPException(status_code=500, detail=f"Claude error: {error_msg}")
+
+            except json_module.JSONDecodeError as e:
+                # Not valid JSON - check if it's a plain error
+                if result.returncode != 0:
+                    error_msg = result.stderr or raw_output or "Unknown error from claude CLI"
+                    logger.error(f"Claude CLI error (non-JSON): {error_msg}")
+                    raise HTTPException(status_code=500, detail=f"Claude CLI error: {error_msg}")
+
+                # Otherwise treat as plain text response (unusual but possible)
+                logger.warning(f"Claude CLI returned non-JSON output: {raw_output[:200]}")
+                return AIResponse(
+                    response=raw_output,
+                    model="claude-cli",
+                    tokens_used=None,
+                    finish_reason="stop"
+                )
+        else:
+            # No stdout - check stderr for errors
+            if result.returncode != 0:
+                error_msg = result.stderr or "Unknown error from claude CLI (empty response)"
+                logger.error(f"Claude CLI error (empty stdout): {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Claude CLI error: {error_msg}")
+
             raise HTTPException(status_code=500, detail="Claude CLI returned empty response")
-
-        # Parse JSON response
-        try:
-            cli_response = json_module.loads(raw_output)
-        except json_module.JSONDecodeError as e:
-            logger.error(f"Failed to parse Claude CLI JSON: {e}")
-            # Fallback: treat as plain text
-            return AIResponse(
-                response=raw_output,
-                model="claude-cli",
-                tokens_used=None,
-                finish_reason="stop"
-            )
-
-        # Check for error
-        if cli_response.get("is_error"):
-            error_msg = cli_response.get("result", "Unknown error")
-            raise HTTPException(status_code=500, detail=f"Claude error: {error_msg}")
 
         # Track usage
         claude_cost_tracker.track_usage(cli_response)
@@ -292,81 +324,174 @@ async def chatgpt_endpoint(
     api_key: str = Depends(get_api_key)
 ):
     """
-    ChatGPT endpoint (OpenAI)
+    ChatGPT endpoint via OpenAI Codex CLI
 
     Features:
-    - GPT-4.1 (default) - Latest 2025 model, best coding & instruction following
-    - Context window: up to 1M tokens
-    - Fast response times
-    - Vision support (can analyze images)
-    - Function calling support
+    - Uses logged-in ChatGPT account (no API costs on your bill!)
+    - Codex CLI in exec mode for non-interactive use
+    - JSONL output for response extraction
+    - Default model: o4-mini (fast and cost-effective)
+    - System prompt support
+    - Cost tracking at /ai/chatgpt/cost-status
+
+    Note: Uses your ChatGPT Plus/Pro subscription - no API billing.
     """
+    import subprocess
+    import asyncio
+    import json as json_module
+    from ..services.codex_cost_tracker import codex_cost_tracker
+
     try:
-        from openai import OpenAI
-        import os
-
-        # Configure OpenAI API
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if not openai_key or openai_key == "placeholder":
-            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
-
-        client = OpenAI(api_key=openai_key)
-
-        # Extract prompt text and images
+        # Extract prompt text
         prompt_text = ""
-        images_data = []
-
         if isinstance(prompt.prompt, str):
-            # Simple text prompt
             prompt_text = prompt.prompt
         else:
-            # Prompt with text + images
             prompt_text = prompt.prompt.text
             if prompt.prompt.images:
-                # OpenAI expects images in specific format
-                for img_b64 in prompt.prompt.images:
-                    # Keep data:image/... prefix or add it
-                    if not img_b64.startswith('data:image'):
-                        img_b64 = f"data:image/png;base64,{img_b64}"
+                logger.warning("Codex CLI mode does not support images via this endpoint - ignoring images")
 
-                    images_data.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": img_b64
-                        }
-                    })
+        # Codex CLI has no --system-prompt, so prepend system prompt to user prompt
+        if prompt.system:
+            prompt_text = f"{prompt.system}\n\n{prompt_text}"
+            logger.info(f"Prepended system prompt ({len(prompt.system)} chars) to user prompt")
 
-        # Build messages content
-        if images_data:
-            # Vision request: text + images
-            content = [{"type": "text", "text": prompt_text}] + images_data
-        else:
-            # Text-only request
-            content = prompt_text
+        logger.info(f"Calling codex exec with prompt length: {len(prompt_text)} chars")
 
-        # Call OpenAI API
-        model_name = model or "gpt-4.1"  # Default to GPT-4.1 (latest 2025, best performance)
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "user", "content": content}
-            ],
-            max_tokens=prompt.max_tokens or 1000,
-            temperature=prompt.temperature or 0.7
+        # Build CLI command
+        # codex exec --json --skip-git-repo-check "prompt"
+        cmd = ["codex", "exec", "--json", "--skip-git-repo-check"]
+
+        # Only add model if explicitly specified by user
+        # (ChatGPT subscription has limited model access, let Codex use its default)
+        selected_model = model  # None if not specified
+        if selected_model:
+            cmd.extend(["--model", selected_model])
+
+        # Add prompt as argument
+        cmd.append(prompt_text)
+
+        # Call codex exec in subprocess
+        def run_codex_cli():
+            import os
+            import pwd
+            env = os.environ.copy()
+            env["NO_COLOR"] = "1"
+            cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+            env["HOME"] = cli_home
+
+            # Remove OPENAI_API_KEY so Codex CLI uses OAuth credentials
+            env.pop("OPENAI_API_KEY", None)
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+                env=env
+            )
+            return result
+
+        result = await asyncio.to_thread(run_codex_cli)
+
+        # Log the result for debugging
+        logger.info(f"Codex CLI returncode: {result.returncode}")
+        logger.info(f"Codex CLI stdout length: {len(result.stdout) if result.stdout else 0}")
+        if result.stderr:
+            logger.info(f"Codex CLI stderr: {result.stderr[:200]}")
+
+        raw_output = result.stdout.strip() if result.stdout else ""
+
+        if not raw_output:
+            if result.returncode != 0:
+                error_msg = result.stderr or "Unknown error from codex CLI (empty response)"
+                logger.error(f"Codex CLI error (empty stdout): {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Codex CLI error: {error_msg}")
+            raise HTTPException(status_code=500, detail="Codex CLI returned empty response")
+
+        # Parse JSONL output - each line is a separate JSON object
+        # We need to find the agent_message item and usage info
+        response_text = ""
+        input_tokens = 0
+        output_tokens = 0
+        model_name = selected_model or "codex-default"  # Track as codex-default if no model specified
+
+        for line in raw_output.split('\n'):
+            if not line.strip():
+                continue
+            try:
+                event = json_module.loads(line)
+
+                # Extract agent message
+                if event.get("type") == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        response_text = item.get("text", "")
+
+                # Extract usage info
+                if event.get("type") == "turn.completed":
+                    usage = event.get("usage", {})
+                    input_tokens = usage.get("input_tokens", 0)
+                    output_tokens = usage.get("output_tokens", 0)
+
+            except json_module.JSONDecodeError:
+                continue
+
+        if not response_text:
+            logger.error(f"No agent_message found in Codex output: {raw_output[:500]}")
+            raise HTTPException(status_code=500, detail="No response from Codex CLI")
+
+        # Track usage
+        codex_cost_tracker.track_usage({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model_name
+        })
+
+        tokens_used = input_tokens + output_tokens
+
+        logger.info(
+            f"Codex CLI response: {len(response_text)} chars, "
+            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out)"
         )
 
         return AIResponse(
-            response=response.choices[0].message.content,
-            model=response.model,
-            tokens_used=response.usage.total_tokens,
-            finish_reason=response.choices[0].finish_reason
+            response=response_text,
+            model=model_name,
+            tokens_used=tokens_used,
+            finish_reason="stop"
         )
+
+    except subprocess.TimeoutExpired:
+        logger.error("Codex CLI timeout after 300 seconds")
+        raise HTTPException(status_code=504, detail="Codex CLI timeout - prompt may be too long")
+    except FileNotFoundError:
+        logger.error("Codex CLI not found - is 'codex' installed?")
+        raise HTTPException(status_code=500, detail="Codex CLI not installed on server")
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         error_msg = f"{type(e).__name__}: {str(e)}"
-        logger.error(f"ChatGPT error: {error_msg}")
+        logger.error(f"Codex error: {error_msg}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+@router.get("/chatgpt/cost-status")
+async def chatgpt_cost_status():
+    """
+    Get current Codex CLI cost tracking status.
+
+    Returns:
+    - Current month's usage and costs
+    - Token breakdown by model
+    - Request statistics
+
+    Note: Costs are informational - Codex CLI uses your subscription.
+    """
+    from ..services.codex_cost_tracker import codex_cost_tracker
+    return codex_cost_tracker.get_status()
 
 
 @router.post("/gemini", response_model=AIResponse)
@@ -376,118 +501,149 @@ async def gemini_endpoint(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Gemini endpoint (Google)
+    Gemini endpoint via Google Gemini CLI
 
     Features:
-    - Gemini 2.5 Flash (default) - Stable GA model, fast and cost-effective
-    - Alternative models: gemini-2.5-pro, gemini-2.5-flash-lite
-    - Multimodal capabilities (vision support)
-    - Note: All Gemini 1.x models are retired
-    - Cost tracking with monthly budget limit (default: 30 EUR)
+    - Uses free tier (60 req/min, 1000 req/day - NO API costs!)
+    - Gemini 2.5 Flash-Lite with 1M token context
+    - JSON output for token tracking
+    - Usage tracking at /ai/gemini/cost-status
 
-    Accepts:
-    - Simple string prompt: {"prompt": "your text"}
-    - Vision prompt: {"prompt": {"text": "describe this", "images": ["base64..."]}}
-
-    Returns 429 if monthly budget is exceeded.
+    Note: Uses Google's free tier CLI - no API billing.
     """
+    import subprocess
+    import asyncio
+    import json as json_module
+    from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+
     try:
-        import google.generativeai as genai
-        import os
-        import base64
-        from PIL import Image
-        import io
-        from ..services.cost_tracker import cost_tracker
-
-        # Check budget before processing
-        if cost_tracker.should_block_request():
-            status = cost_tracker.get_status()
-            raise HTTPException(
-                status_code=429,
-                detail=f"Monthly Gemini API budget exceeded: {status['total_cost_eur']:.2f}/{status['monthly_budget_eur']:.2f} EUR. Requests blocked until next month."
-            )
-
-        # Configure Gemini API
-        gemini_key = os.getenv("GOOGLE_API_KEY")
-        if not gemini_key or gemini_key == "placeholder":
-            raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured")
-
-        genai.configure(api_key=gemini_key)
-
-        # Extract prompt text and images
+        # Extract prompt text
         prompt_text = ""
-        images_data = []
-
-        # Select model
-        model_name = model or 'gemini-2.5-flash'  # Default to Gemini 2.5 Flash
-        gemini_model = genai.GenerativeModel(model_name)
-
         if isinstance(prompt.prompt, str):
-            # Simple text prompt
             prompt_text = prompt.prompt
         else:
-            # Vision prompt with text + images
             prompt_text = prompt.prompt.text
             if prompt.prompt.images:
-                # Decode base64 images
-                for img_b64 in prompt.prompt.images:
-                    # Remove data:image/... prefix if present
-                    if ',' in img_b64:
-                        img_b64 = img_b64.split(',', 1)[1]
+                logger.warning("Gemini CLI mode does not support images via this endpoint - ignoring images")
 
-                    img_bytes = base64.b64decode(img_b64)
-                    img = Image.open(io.BytesIO(img_bytes))
-                    images_data.append(img)
+        # Gemini CLI has no --system-prompt, so prepend system prompt to user prompt
+        if prompt.system:
+            prompt_text = f"{prompt.system}\n\n{prompt_text}"
+            logger.info(f"Prepended system prompt ({len(prompt.system)} chars) to user prompt")
 
-        # Build content parts
-        if images_data:
-            # Vision request: [text, image1, image2, ...]
-            content_parts = [prompt_text] + images_data
-        else:
-            # Text-only request
-            content_parts = [prompt_text]
+        logger.info(f"Calling gemini CLI with prompt length: {len(prompt_text)} chars")
 
-        # Generate response
-        response = gemini_model.generate_content(content_parts)
+        # Build CLI command
+        # gemini --output-format json "prompt"
+        cmd = ["gemini", "--output-format", "json", prompt_text]
 
-        # Extract token usage from usage_metadata
-        tokens_used = None
+        # Call gemini in subprocess
+        def run_gemini_cli():
+            import os
+            import pwd
+            env = os.environ.copy()
+            env["NO_COLOR"] = "1"
+            cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+            env["HOME"] = cli_home
+
+            # Gemini CLI expects GEMINI_API_KEY, but we use GOOGLE_API_KEY
+            google_key = os.getenv("GOOGLE_API_KEY", "")
+            if google_key:
+                env["GEMINI_API_KEY"] = google_key
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+                env=env
+            )
+            return result
+
+        result = await asyncio.to_thread(run_gemini_cli)
+
+        # Log the result for debugging
+        logger.info(f"Gemini CLI returncode: {result.returncode}")
+        logger.info(f"Gemini CLI stdout length: {len(result.stdout) if result.stdout else 0}")
+        if result.stderr:
+            logger.info(f"Gemini CLI stderr: {result.stderr[:200]}")
+
+        raw_output = result.stdout.strip() if result.stdout else ""
+
+        if not raw_output:
+            if result.returncode != 0:
+                error_msg = result.stderr or "Unknown error from gemini CLI (empty response)"
+                logger.error(f"Gemini CLI error (empty stdout): {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Gemini CLI error: {error_msg}")
+            raise HTTPException(status_code=500, detail="Gemini CLI returned empty response")
+
+        # Parse JSON output
+        # Format: {"response": "...", "stats": {"models": {"gemini-2.5-flash-lite": {"tokens": {...}}}}}
+        try:
+            cli_response = json_module.loads(raw_output)
+        except json_module.JSONDecodeError as e:
+            logger.error(f"Failed to parse Gemini CLI JSON: {e}")
+            logger.error(f"Raw output: {raw_output[:500]}")
+            # Return raw output as response if JSON parsing fails
+            return AIResponse(
+                response=raw_output,
+                model="gemini-cli",
+                tokens_used=None,
+                finish_reason="stop"
+            )
+
+        # Extract response text
+        response_text = cli_response.get("response", "")
+
+        # Extract token info from stats
         input_tokens = 0
         output_tokens = 0
+        model_name = "gemini-cli"
 
-        # Debug log to see what we get from Gemini
-        logger.info(f"Gemini response type: {type(response)}")
-        logger.info(f"Has usage_metadata: {hasattr(response, 'usage_metadata')}")
-        if hasattr(response, 'usage_metadata'):
-            logger.info(f"usage_metadata: {response.usage_metadata}")
+        stats = cli_response.get("stats", {})
+        models = stats.get("models", {})
 
-        if hasattr(response, 'usage_metadata') and response.usage_metadata:
-            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
-            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) or 0
-            tokens_used = input_tokens + output_tokens
-            logger.info(f"Extracted tokens: input={input_tokens}, output={output_tokens}")
+        # Get the first model from stats (usually gemini-2.5-flash-lite)
+        for m_name, m_data in models.items():
+            model_name = m_name
+            tokens = m_data.get("tokens", {})
+            input_tokens = tokens.get("prompt", 0)
+            output_tokens = tokens.get("candidates", 0)
+            break
 
-        # Track usage for cost monitoring (even if 0, to count requests)
-        if input_tokens > 0 or output_tokens > 0:
-            cost_tracker.track_usage(
-                model=model_name,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens
-            )
-            logger.info(f"Tracked Gemini usage: {input_tokens}in/{output_tokens}out")
-        else:
-            logger.warning(f"No token info from Gemini - cannot track usage")
+        # Track usage
+        gemini_cli_cost_tracker.track_usage({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model_name
+        })
+
+        tokens_used = input_tokens + output_tokens
+
+        logger.info(
+            f"Gemini CLI response: {len(response_text)} chars, "
+            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out)"
+        )
 
         return AIResponse(
-            response=response.text,
-            model=f"{model_name}-vision" if images_data else model_name,
+            response=response_text,
+            model=model_name,
             tokens_used=tokens_used,
             finish_reason="stop"
         )
+
+    except subprocess.TimeoutExpired:
+        logger.error("Gemini CLI timeout after 300 seconds")
+        raise HTTPException(status_code=504, detail="Gemini CLI timeout - prompt may be too long")
+    except FileNotFoundError:
+        logger.error("Gemini CLI not found - is 'gemini' installed?")
+        raise HTTPException(status_code=500, detail="Gemini CLI not installed on server")
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         error_msg = f"{type(e).__name__}: {str(e)}"
-        logger.error(f"Gemini error: {error_msg}")
+        logger.error(f"Gemini CLI error: {error_msg}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_msg)
 
@@ -495,25 +651,179 @@ async def gemini_endpoint(
 @router.get("/gemini/cost-status")
 async def gemini_cost_status():
     """
-    Get current Gemini API cost tracking status.
+    Get current Gemini CLI usage tracking status.
 
     Returns:
-    - Current month's usage and costs
-    - Budget information
-    - Whether requests are blocked
+    - Current month's usage and estimated costs
+    - Token breakdown by model
+    - Request statistics
+
+    Note: Costs are informational only - Gemini CLI uses free tier (no actual billing).
     """
-    from ..services.cost_tracker import cost_tracker
-    return cost_tracker.get_status()
+    from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+    return gemini_cli_cost_tracker.get_status()
+
+
+@router.post("/gemini/vision", response_model=AIResponse)
+async def gemini_vision_endpoint(
+    prompt: Prompt,
+    model: Optional[str] = None,
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Gemini Vision endpoint via Google Generative AI API.
+
+    Features:
+    - Supports multimodal input (text + images)
+    - Uses Gemini 2.0 Flash for vision tasks
+    - Base64 encoded images in prompt.images array
+    - Perfect for image analysis, safety checks, content moderation
+
+    Note: Uses GOOGLE_API_KEY from environment.
+    """
+    import os
+    import base64
+    import google.generativeai as genai
+    from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+
+    try:
+        # Get API key from environment
+        google_api_key = os.getenv("GOOGLE_API_KEY", "")
+        if not google_api_key:
+            raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured")
+
+        # Configure Gemini
+        genai.configure(api_key=google_api_key)
+
+        # Extract prompt text and images
+        prompt_text = ""
+        images_b64 = []
+
+        if isinstance(prompt.prompt, str):
+            prompt_text = prompt.prompt
+        else:
+            prompt_text = prompt.prompt.text
+            if prompt.prompt.images:
+                images_b64 = prompt.prompt.images
+
+        logger.info(f"Calling Gemini Vision API with prompt length: {len(prompt_text)} chars, images: {len(images_b64)}")
+
+        # Select model - use gemini-2.0-flash for vision (fast and capable)
+        model_name = model or "gemini-2.0-flash"
+        gemini_model = genai.GenerativeModel(model_name)
+
+        # Build content parts
+        content_parts = []
+
+        # Add images first (better for vision tasks)
+        for i, img_b64 in enumerate(images_b64):
+            try:
+                # Handle data URL format: "data:image/jpeg;base64,..."
+                if img_b64.startswith("data:"):
+                    # Extract mime type and base64 data
+                    header, b64_data = img_b64.split(",", 1)
+                    mime_type = header.split(":")[1].split(";")[0]
+                else:
+                    # Assume raw base64 JPEG
+                    b64_data = img_b64
+                    mime_type = "image/jpeg"
+
+                # Decode and create image part
+                image_data = base64.b64decode(b64_data)
+                content_parts.append({
+                    "mime_type": mime_type,
+                    "data": image_data
+                })
+                logger.info(f"Added image {i+1}: {mime_type}, {len(image_data)} bytes")
+            except Exception as e:
+                logger.warning(f"Failed to process image {i+1}: {e}")
+                continue
+
+        # Add text prompt
+        content_parts.append(prompt_text)
+
+        # Generate response
+        response = gemini_model.generate_content(content_parts)
+
+        # Extract response text
+        response_text = response.text if response.text else ""
+
+        # Extract token counts if available
+        input_tokens = 0
+        output_tokens = 0
+        if hasattr(response, 'usage_metadata'):
+            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
+            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
+
+        # Track usage
+        gemini_cli_cost_tracker.track_usage({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model_name
+        })
+
+        tokens_used = input_tokens + output_tokens
+
+        logger.info(
+            f"Gemini Vision response: {len(response_text)} chars, "
+            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out)"
+        )
+
+        return AIResponse(
+            response=response_text,
+            model=model_name,
+            tokens_used=tokens_used,
+            finish_reason="stop"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Gemini Vision error: {error_msg}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.post("/gemini/send-report")
 async def gemini_send_report():
     """
-    Manually trigger a daily report via Telegram.
+    Manually trigger a usage report via Telegram.
+
+    Note: Shows CLI usage statistics (no actual costs - free tier).
     """
-    from ..services.cost_tracker import cost_tracker
-    cost_tracker.send_daily_report()
-    return {"status": "Report sent"}
+    from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+
+    # Get status and send via Telegram
+    status = gemini_cli_cost_tracker.get_status()
+
+    import httpx
+    import os
+    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+
+    if telegram_token and telegram_chat:
+        message = f"""
+📊 <b>Gemini CLI Usage Report</b>
+
+<b>Month:</b> {status.get('month', 'N/A')}
+<b>Requests:</b> {status.get('request_count', 0):,}
+<b>Input Tokens:</b> {status.get('total_input_tokens', 0):,}
+<b>Output Tokens:</b> {status.get('total_output_tokens', 0):,}
+
+<b>Estimated Value:</b> ${status.get('total_cost_usd', 0):.4f} (if API)
+
+<i>Note: Gemini CLI uses free tier - no actual costs!</i>
+"""
+        try:
+            url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+            with httpx.Client(timeout=10.0) as client:
+                client.post(url, json={"chat_id": telegram_chat, "text": message.strip(), "parse_mode": "HTML"})
+        except Exception:
+            pass
+
+    return {"status": "Report sent", "usage": status}
 
 
 @router.post("/gemini/gcp-budget-webhook")
@@ -527,10 +837,13 @@ async def gcp_budget_webhook(request: Request):
 
     This is a BACKUP alert system with ~24h delay.
     Primary alerting is done via real-time token tracking.
+
+    NOTE: Uses NotificationManager to limit alerts to max 1 per day.
     """
     import base64
     import json
     from ..services.cost_tracker import cost_tracker
+    from ..services.notification_manager import notification_manager
 
     try:
         body = await request.json()
@@ -545,6 +858,17 @@ async def gcp_budget_webhook(request: Request):
             cost_amount = budget_data.get("costAmount", 0)
             budget_amount = budget_data.get("budgetAmount", 0)
             threshold = budget_data.get("alertThresholdExceeded", 0) * 100
+
+            logger.info(f"GCP Budget webhook received: {threshold:.0f}% threshold for {budget_name}")
+
+            # Check if we can send notification (cooldown: 24h)
+            if not notification_manager.can_send("gcp_budget_alert"):
+                next_allowed = notification_manager.get_next_allowed("gcp_budget_alert")
+                logger.info(
+                    f"GCP Budget alert suppressed (cooldown). "
+                    f"Next allowed: {next_allowed.isoformat() if next_allowed else 'now'}"
+                )
+                return {"status": "ok", "notification": "suppressed_cooldown"}
 
             # Determine emoji and status
             if threshold >= 100:
@@ -568,13 +892,38 @@ async def gcp_budget_webhook(request: Request):
 <i>Real-time status: /ai/gemini/cost-status</i>
 """
             cost_tracker._send_telegram_message(message.strip())
-            logger.info(f"GCP Budget webhook: {threshold}% threshold for {budget_name}")
+            notification_manager.mark_sent("gcp_budget_alert")
+            logger.info(f"GCP Budget webhook: sent alert for {threshold:.0f}% threshold")
 
-        return {"status": "ok"}
+        return {"status": "ok", "notification": "sent"}
 
     except Exception as e:
         logger.error(f"GCP Budget webhook error: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@router.get("/notifications/status")
+async def get_notification_status():
+    """
+    Get notification manager status.
+
+    Shows cooldown state for all notification types.
+    """
+    from ..services.notification_manager import notification_manager
+    return notification_manager.get_status()
+
+
+@router.post("/notifications/reset/{notification_type}")
+async def reset_notification_cooldown(notification_type: str):
+    """
+    Reset cooldown for a specific notification type.
+
+    Args:
+        notification_type: Type to reset (e.g., "gcp_budget_alert")
+    """
+    from ..services.notification_manager import notification_manager
+    notification_manager.reset(notification_type)
+    return {"status": "reset", "notification_type": notification_type}
 
 
 @router.get("/models")
