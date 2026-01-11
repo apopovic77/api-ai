@@ -109,7 +109,8 @@ async def claude_endpoint(
         logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars")
 
         # Build CLI command with default model sonnet (cost-effective)
-        cmd = ["claude", "-p", prompt_text, "--output-format", "json"]
+        # Use --permission-mode bypassPermissions to allow reading any file
+        cmd = ["claude", "-p", prompt_text, "--output-format", "json", "--permission-mode", "bypassPermissions"]
 
         # Add model - default to sonnet (günstig), user can override with opus/haiku
         selected_model = model or "sonnet"
@@ -135,12 +136,14 @@ async def claude_endpoint(
             # to use it instead of the logged-in OAuth credentials
             env.pop("ANTHROPIC_API_KEY", None)
 
+            # Run from root directory to have access to all paths
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 minute timeout for longer prompts
-                env=env
+                env=env,
+                cwd="/"  # Start from root for full filesystem access
             )
             return result
 
