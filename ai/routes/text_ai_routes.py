@@ -109,8 +109,7 @@ async def claude_endpoint(
         logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars")
 
         # Build CLI command with default model sonnet (cost-effective)
-        # Use --permission-mode bypassPermissions to allow reading any file
-        cmd = ["claude", "-p", prompt_text, "--output-format", "json", "--permission-mode", "bypassPermissions"]
+        cmd = ["claude", "-p", prompt_text, "--output-format", "json"]
 
         # Add model - default to sonnet (günstig), user can override with opus/haiku
         selected_model = model or "sonnet"
@@ -124,27 +123,62 @@ async def claude_endpoint(
         def run_claude_cli():
             import os
             import pwd
-            # Create env with HOME for Claude credentials
-            # Use CLI_HOME env var, or detect from current user (gsgbot on aiserver, root on arkturian)
+            import shlex
+
+            # Check if running as root - if so, run claude as a non-root user to enable permission bypass
+            cli_user = os.getenv("CLI_USER", "alex")  # Default to alex
+            running_as_root = os.getuid() == 0
+
+            # Determine HOME directory
+            if running_as_root:
+                try:
+                    cli_home = pwd.getpwnam(cli_user).pw_dir
+                except KeyError:
+                    cli_home = f"/home/{cli_user}"
+            else:
+                cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+
+            # Build environment
             env = os.environ.copy()
             env["NO_COLOR"] = "1"
-            cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
             env["HOME"] = cli_home
 
             # IMPORTANT: Remove ANTHROPIC_API_KEY so Claude CLI uses OAuth credentials
-            # If ANTHROPIC_API_KEY is set (even to "placeholder"), Claude CLI will try
-            # to use it instead of the logged-in OAuth credentials
             env.pop("ANTHROPIC_API_KEY", None)
 
-            # Run from root directory to have access to all paths
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout for longer prompts
-                env=env,
-                cwd="/"  # Start from root for full filesystem access
-            )
+            # If running as root with images, use su to run as non-root user (allows permission bypass)
+            if running_as_root and image_paths:
+                # Build the claude command with proper escaping
+                claude_args = [
+                    "claude", "-p", shlex.quote(prompt_text),
+                    "--output-format", "json",
+                    "--permission-mode", "bypassPermissions",
+                    "--model", selected_model
+                ]
+                if prompt.system:
+                    claude_args.extend(["--system-prompt", shlex.quote(prompt.system)])
+
+                claude_cmd = " ".join(claude_args)
+                full_cmd = ["su", "-", cli_user, "-c", claude_cmd]
+
+                logger.info(f"Running claude as {cli_user} with permission bypass")
+                result = subprocess.run(
+                    full_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    cwd="/"
+                )
+            else:
+                # Run directly (non-root or no images)
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    env=env,
+                    cwd="/"
+                )
             return result
 
         result = await asyncio.to_thread(run_claude_cli)
