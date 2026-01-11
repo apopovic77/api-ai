@@ -642,8 +642,9 @@ class AudioDramaGenerator(SpeechGenerator):
                     'meta': {'label':'music'}
                 })
             register_temp_dialog_chunks(self.request.id, registry)
-        except Exception:
-            pass
+            print(f"--- Audio Drama: Registered {len(registry)} chunks for {self.request.id}")
+        except Exception as e:
+            print(f"--- Audio Drama: Failed to register chunks: {e}")
 
         try:
             mixed_bytes = await asyncio.wait_for(asyncio.to_thread(tts_service.mix_final_audio,

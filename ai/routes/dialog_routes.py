@@ -48,7 +48,26 @@ def get_api_key():
 
 
 def register_temp_dialog_chunks(req_id: str, items: List[Dict[str, Any]]):
+    """Register temp dialog chunks in memory AND persist to disk for multi-worker access."""
     TEMP_DIALOG_REGISTRY[req_id] = items
+    # Persist to disk for cross-worker visibility (uvicorn --workers 2)
+    try:
+        with open(os.path.join(STATUS_DIR, f"{req_id}.chunks.json"), "w") as f:
+            _json.dump(items, f)
+    except Exception:
+        pass
+
+
+def _load_chunks_from_disk(req_id: str) -> List[Dict[str, Any]]:
+    """Load chunks from disk if not in memory (for multi-worker scenarios)."""
+    chunks_path = os.path.join(STATUS_DIR, f"{req_id}.chunks.json")
+    if not os.path.exists(chunks_path):
+        return []
+    try:
+        with open(chunks_path, "r") as f:
+            return _json.load(f)
+    except Exception:
+        return []
 
 
 def _append_status_event(req_id: str, event: Dict[str, Any]):
@@ -120,9 +139,22 @@ def get_temp_dialog_chunk(id: str, index: int):
 
     Used for streaming dialog as it's being generated.
     Returns the audio file for a specific chunk index.
+
+    Note: Uses disk-based fallback to support multi-worker uvicorn deployments.
     """
     try:
-        items = TEMP_DIALOG_REGISTRY.get(id) or []
+        # Try in-memory first, then disk fallback for multi-worker scenarios
+        items = TEMP_DIALOG_REGISTRY.get(id)
+        if not items:
+            # Fallback to disk for cross-worker access
+            items = _load_chunks_from_disk(id)
+            if items:
+                # Cache in memory for subsequent requests to this worker
+                TEMP_DIALOG_REGISTRY[id] = items
+
+        if not items:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+
         # Find by original sequence index (robust to filtered registry order)
         match = None
         for it in items:
@@ -163,6 +195,10 @@ def clear_temp_dialog_chunks(id: str):
         pass
     try:
         os.remove(os.path.join(STATUS_DIR, f"{id}.events.jsonl"))
+    except Exception:
+        pass
+    try:
+        os.remove(os.path.join(STATUS_DIR, f"{id}.chunks.json"))
     except Exception:
         pass
     return {"status": "cleared"}
