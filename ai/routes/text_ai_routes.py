@@ -21,7 +21,8 @@ router = APIRouter()
 class PromptText(BaseModel):
     """Nested text/images structure for legacy compatibility"""
     text: str
-    images: Optional[List[str]] = None  # Base64 encoded images
+    images: Optional[List[str]] = None  # Base64 encoded images (legacy, not supported by CLI)
+    image_paths: Optional[List[str]] = None  # Local file paths - Claude CLI reads these directly
 
 class Prompt(BaseModel):
     prompt: Union[str, PromptText]  # Support both string and nested object
@@ -29,6 +30,7 @@ class Prompt(BaseModel):
     max_tokens: Optional[int] = 1000
     temperature: Optional[float] = 0.7
     conversation_history: Optional[List[Dict[str, str]]] = None
+    image_paths: Optional[List[str]] = None  # Top-level image paths for convenience
 
 
 class AIResponse(BaseModel):
@@ -81,14 +83,28 @@ async def claude_endpoint(
 
         if isinstance(prompt.prompt, str):
             prompt_text = prompt.prompt
+            image_paths = prompt.image_paths or []
         else:
             prompt_text = prompt.prompt.text
-            if prompt.prompt.images:
-                # Claude CLI doesn't support images - log warning and continue with text only
+            # Collect image paths from nested or top-level
+            image_paths = prompt.prompt.image_paths or prompt.image_paths or []
+            if prompt.prompt.images and not image_paths:
+                # Legacy base64 images - Claude CLI can't handle these
                 logger.warning(
-                    f"Claude CLI does not support images - ignoring {len(prompt.prompt.images)} images. "
-                    f"Use /ai/gemini/vision for vision tasks."
+                    f"Claude CLI does not support base64 images - ignoring {len(prompt.prompt.images)} images. "
+                    f"Use image_paths with local file paths instead."
                 )
+
+        # Append image paths to prompt - Claude CLI will read and analyze them
+        if image_paths:
+            import os
+            valid_paths = [p for p in image_paths if os.path.exists(p)]
+            if valid_paths:
+                paths_text = "\n".join(valid_paths)
+                prompt_text = f"{prompt_text}\n\nAnalysiere folgende Bilder:\n{paths_text}"
+                logger.info(f"Added {len(valid_paths)} image paths to prompt for Claude CLI")
+            else:
+                logger.warning(f"None of the {len(image_paths)} image paths exist: {image_paths}")
 
         logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars")
 
