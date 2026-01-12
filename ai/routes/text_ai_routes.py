@@ -21,7 +21,8 @@ router = APIRouter()
 class PromptText(BaseModel):
     """Nested text/images structure for legacy compatibility"""
     text: str
-    images: Optional[List[str]] = None  # Base64 encoded images
+    images: Optional[List[str]] = None  # Base64 encoded images (legacy, not supported by CLI)
+    image_paths: Optional[List[str]] = None  # Local file paths - Claude CLI reads these directly
 
 class Prompt(BaseModel):
     prompt: Union[str, PromptText]  # Support both string and nested object
@@ -29,6 +30,7 @@ class Prompt(BaseModel):
     max_tokens: Optional[int] = 1000
     temperature: Optional[float] = 0.7
     conversation_history: Optional[List[Dict[str, str]]] = None
+    image_paths: Optional[List[str]] = None  # Top-level image paths for convenience
 
 
 class AIResponse(BaseModel):
@@ -81,14 +83,28 @@ async def claude_endpoint(
 
         if isinstance(prompt.prompt, str):
             prompt_text = prompt.prompt
+            image_paths = prompt.image_paths or []
         else:
             prompt_text = prompt.prompt.text
-            if prompt.prompt.images:
-                # Claude CLI doesn't support images - log warning and continue with text only
+            # Collect image paths from nested or top-level
+            image_paths = prompt.prompt.image_paths or prompt.image_paths or []
+            if prompt.prompt.images and not image_paths:
+                # Legacy base64 images - Claude CLI can't handle these
                 logger.warning(
-                    f"Claude CLI does not support images - ignoring {len(prompt.prompt.images)} images. "
-                    f"Use /ai/gemini/vision for vision tasks."
+                    f"Claude CLI does not support base64 images - ignoring {len(prompt.prompt.images)} images. "
+                    f"Use image_paths with local file paths instead."
                 )
+
+        # Append image paths to prompt - Claude CLI will read and analyze them
+        if image_paths:
+            import os
+            valid_paths = [p for p in image_paths if os.path.exists(p)]
+            if valid_paths:
+                paths_text = "\n".join(valid_paths)
+                prompt_text = f"{prompt_text}\n\nAnalysiere folgende Bilder:\n{paths_text}"
+                logger.info(f"Added {len(valid_paths)} image paths to prompt for Claude CLI")
+            else:
+                logger.warning(f"None of the {len(image_paths)} image paths exist: {image_paths}")
 
         logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars")
 
@@ -107,24 +123,38 @@ async def claude_endpoint(
         def run_claude_cli():
             import os
             import pwd
-            # Create env with HOME for Claude credentials
-            # Use CLI_HOME env var, or detect from current user (gsgbot on aiserver, root on arkturian)
+            import shlex
+
+            # Check if running as root - if so, run claude as a non-root user to enable permission bypass
+            cli_user = os.getenv("CLI_USER", "alex")  # Default to alex
+            running_as_root = os.getuid() == 0
+
+            # Determine HOME directory
+            if running_as_root:
+                try:
+                    cli_home = pwd.getpwnam(cli_user).pw_dir
+                except KeyError:
+                    cli_home = f"/home/{cli_user}"
+            else:
+                cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+
+            # Build environment
             env = os.environ.copy()
             env["NO_COLOR"] = "1"
-            cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
             env["HOME"] = cli_home
 
             # IMPORTANT: Remove ANTHROPIC_API_KEY so Claude CLI uses OAuth credentials
-            # If ANTHROPIC_API_KEY is set (even to "placeholder"), Claude CLI will try
-            # to use it instead of the logged-in OAuth credentials
             env.pop("ANTHROPIC_API_KEY", None)
 
+            # Run claude directly - root has access to all files, no permission bypass needed
+            # The key is setting HOME to a non-root user's home so Claude credentials work
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout for longer prompts
-                env=env
+                timeout=300,
+                env=env,
+                cwd="/"
             )
             return result
 
@@ -265,14 +295,19 @@ async def chatgpt_endpoint(
     from ..services.codex_cost_tracker import codex_cost_tracker
 
     try:
-        # Extract prompt text
+        # Extract prompt text and image paths
         prompt_text = ""
+        image_paths = []
+
         if isinstance(prompt.prompt, str):
             prompt_text = prompt.prompt
+            image_paths = prompt.image_paths or []
         else:
             prompt_text = prompt.prompt.text
-            if prompt.prompt.images:
-                logger.warning("Codex CLI mode does not support images via this endpoint - ignoring images")
+            # Collect image paths from nested or top-level
+            image_paths = prompt.prompt.image_paths or prompt.image_paths or []
+            if prompt.prompt.images and not image_paths:
+                logger.warning("Codex CLI does not support base64 images - use image_paths instead")
 
         # Codex CLI has no --system-prompt, so prepend system prompt to user prompt
         if prompt.system:
@@ -290,6 +325,16 @@ async def chatgpt_endpoint(
         selected_model = model  # None if not specified
         if selected_model:
             cmd.extend(["--model", selected_model])
+
+        # Add image paths via -i flag (Codex supports multiple -i flags)
+        if image_paths:
+            import os
+            for img_path in image_paths:
+                if os.path.exists(img_path):
+                    cmd.extend(["-i", img_path])
+                    logger.info(f"Added image to Codex command: {img_path}")
+                else:
+                    logger.warning(f"Image path does not exist: {img_path}")
 
         # Add prompt as argument
         cmd.append(prompt_text)
@@ -417,6 +462,93 @@ async def chatgpt_cost_status():
     return codex_cost_tracker.get_status()
 
 
+async def _gemini_vision_with_paths(
+    prompt_text: str,
+    image_paths: List[str],
+    model: Optional[str] = None,
+    system_prompt: Optional[str] = None
+) -> AIResponse:
+    """
+    Helper: Use Google Generative AI API for vision analysis with local files.
+
+    Args:
+        prompt_text: The text prompt
+        image_paths: List of local file paths to images
+        model: Optional model override (default: gemini-2.0-flash)
+        system_prompt: Optional system prompt to prepend
+    """
+    import os
+    import google.generativeai as genai
+
+    # Configure API
+    google_api_key = os.getenv("GOOGLE_API_KEY", "")
+    if not google_api_key:
+        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured for vision")
+
+    genai.configure(api_key=google_api_key)
+
+    # Prepend system prompt if provided
+    if system_prompt:
+        prompt_text = f"{system_prompt}\n\n{prompt_text}"
+
+    # Build content parts
+    content_parts = []
+
+    # Add images from file paths
+    for img_path in image_paths:
+        try:
+            with open(img_path, "rb") as f:
+                image_data = f.read()
+
+            # Detect mime type from extension
+            ext = os.path.splitext(img_path)[1].lower()
+            mime_map = {
+                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".gif": "image/gif",
+                ".webp": "image/webp", ".heic": "image/heic"
+            }
+            mime_type = mime_map.get(ext, "image/jpeg")
+
+            content_parts.append({
+                "mime_type": mime_type,
+                "data": image_data
+            })
+            logger.info(f"Loaded image for Gemini Vision: {img_path} ({len(image_data)} bytes)")
+        except Exception as e:
+            logger.warning(f"Failed to load image {img_path}: {e}")
+
+    if not content_parts:
+        raise HTTPException(status_code=400, detail="No valid images could be loaded")
+
+    # Add text prompt
+    content_parts.append(prompt_text)
+
+    # Generate response
+    model_name = model or "gemini-2.0-flash"
+    gemini_model = genai.GenerativeModel(model_name)
+
+    try:
+        response = gemini_model.generate_content(content_parts)
+        response_text = response.text if hasattr(response, 'text') else str(response)
+
+        # Extract token count if available
+        tokens_used = None
+        if hasattr(response, 'usage_metadata'):
+            tokens_used = getattr(response.usage_metadata, 'total_token_count', None)
+
+        logger.info(f"Gemini Vision API response: {len(response_text)} chars")
+
+        return AIResponse(
+            response=response_text,
+            model=model_name,
+            tokens_used=tokens_used,
+            finish_reason="stop"
+        )
+    except Exception as e:
+        logger.error(f"Gemini Vision API error: {e}")
+        raise HTTPException(status_code=500, detail=f"Gemini Vision error: {str(e)}")
+
+
 @router.post("/gemini", response_model=AIResponse)
 async def gemini_endpoint(
     prompt: Prompt,
@@ -424,31 +556,43 @@ async def gemini_endpoint(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Gemini endpoint via Google Gemini CLI
+    Gemini endpoint - auto-routes to CLI or Vision API
 
     Features:
-    - Uses free tier (60 req/min, 1000 req/day - NO API costs!)
-    - Gemini 2.5 Flash-Lite with 1M token context
-    - JSON output for token tracking
+    - Text-only: Uses Gemini CLI (free tier, no API costs)
+    - With images: Uses Google Generative AI API for vision analysis
+    - Supports image_paths for local file analysis
     - Usage tracking at /ai/gemini/cost-status
 
-    Note: Uses Google's free tier CLI - no API billing.
+    Note: CLI uses free tier. Vision API uses GOOGLE_API_KEY.
     """
     import subprocess
     import asyncio
+    import os
     import json as json_module
     from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
 
-    try:
-        # Extract prompt text
-        prompt_text = ""
-        if isinstance(prompt.prompt, str):
-            prompt_text = prompt.prompt
-        else:
-            prompt_text = prompt.prompt.text
-            if prompt.prompt.images:
-                logger.warning("Gemini CLI mode does not support images via this endpoint - ignoring images")
+    # Extract prompt text and image paths
+    prompt_text = ""
+    image_paths = []
 
+    if isinstance(prompt.prompt, str):
+        prompt_text = prompt.prompt
+        image_paths = prompt.image_paths or []
+    else:
+        prompt_text = prompt.prompt.text
+        image_paths = prompt.prompt.image_paths or prompt.image_paths or []
+
+    # If we have image paths, use Google Vision API instead of CLI
+    if image_paths:
+        valid_paths = [p for p in image_paths if os.path.exists(p)]
+        if valid_paths:
+            logger.info(f"Routing to Gemini Vision API for {len(valid_paths)} images")
+            return await _gemini_vision_with_paths(prompt_text, valid_paths, model, prompt.system)
+        else:
+            logger.warning(f"None of {len(image_paths)} image paths exist - falling back to CLI")
+
+    try:
         # Gemini CLI has no --system-prompt, so prepend system prompt to user prompt
         if prompt.system:
             prompt_text = f"{prompt.system}\n\n{prompt_text}"
