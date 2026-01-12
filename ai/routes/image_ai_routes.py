@@ -25,8 +25,8 @@ class ImageGenRequest(BaseModel):
     height: Optional[int] = 1024
     aspect_ratio: Optional[str] = Field(default="1:1", description="Aspect ratio (1:1, 16:9, 9:16)")
     model: Optional[str] = Field(
-        default="higgsfield",
-        description="Model: higgsfield (default), higgsfield-reve, nano-banana, imagen-4"
+        default="nano-banana",
+        description="Model: nano-banana (default), higgsfield, higgsfield-reve, imagen-4"
     )
     collection_id: Optional[str] = Field(default="ai-generated-images", description="Storage collection")
     link_id: Optional[str] = Field(default=None, description="Link ID for related objects")
@@ -239,27 +239,27 @@ async def generate_image_endpoint(
     """
     Generate an image from text prompt using various AI models.
 
-    **Default: Higgsfield** (high quality, fast)
+    **Default: nano-banana (Gemini)** - fast, free
 
     Supported models:
-    - **higgsfield** (default): Higgsfield Soul - high quality text-to-image
-    - **higgsfield-reve**: Reve model via Higgsfield - versatile generation
-    - **nano-banana**: Gemini 2.5 Flash Image - fast, cost-effective
+    - **nano-banana** (default): Gemini 2.5 Flash Image - fast, free
     - **nano-banana-pro**: Gemini 3 Pro Image - best Gemini quality
     - **imagen-4**: Google Imagen 4.0 - photorealistic
+    - **higgsfield**: Higgsfield Soul - high quality (requires credits)
+    - **higgsfield-reve**: Reve model via Higgsfield (requires credits)
 
     Example:
     ```json
     {
         "prompt": "A serene mountain landscape at sunset",
-        "model": "higgsfield",
+        "model": "nano-banana",
         "aspect_ratio": "16:9"
     }
     ```
     """
     try:
         # Determine model
-        model_name = request.model or "higgsfield"
+        model_name = request.model or "nano-banana"
         actual_model = MODEL_MAPPING.get(model_name, model_name)
 
         logger.info(f"Image gen request: model={model_name} -> {actual_model}")
@@ -317,23 +317,11 @@ async def list_image_models():
     return {
         "models": [
             {
-                "id": "higgsfield",
-                "name": "Higgsfield Soul",
-                "provider": "Higgsfield",
-                "description": "High quality text-to-image (default)",
-                "default": True
-            },
-            {
-                "id": "higgsfield-reve",
-                "name": "Reve",
-                "provider": "Higgsfield",
-                "description": "Versatile text-to-image generation"
-            },
-            {
                 "id": "nano-banana",
                 "name": "Nano Banana",
                 "provider": "Google Gemini",
-                "description": "Fast, cost-effective image generation"
+                "description": "Fast, free image generation (default)",
+                "default": True
             },
             {
                 "id": "nano-banana-pro",
@@ -346,6 +334,18 @@ async def list_image_models():
                 "name": "Imagen 4",
                 "provider": "Google",
                 "description": "Photorealistic image generation"
+            },
+            {
+                "id": "higgsfield",
+                "name": "Higgsfield Soul",
+                "provider": "Higgsfield",
+                "description": "High quality text-to-image (requires credits)"
+            },
+            {
+                "id": "higgsfield-reve",
+                "name": "Reve",
+                "provider": "Higgsfield",
+                "description": "Versatile text-to-image (requires credits)"
             }
         ]
     }
