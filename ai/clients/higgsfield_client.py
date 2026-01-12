@@ -162,7 +162,7 @@ class HiggsFieldClient:
         prompt: str,
         model: str = HiggsFieldImageModel.SOUL_STANDARD,
         aspect_ratio: str = "1:1",
-        resolution: str = "1024"
+        resolution: str = "1080p"
     ) -> HiggsFieldResponse:
         """
         Submit image generation request.
@@ -171,12 +171,17 @@ class HiggsFieldClient:
             prompt: Text description of desired image
             model: Model to use (default: higgsfield-ai/soul/standard)
             aspect_ratio: Image aspect ratio (e.g., "1:1", "16:9", "9:16")
-            resolution: Image resolution (e.g., "720p", "1024")
+            resolution: Image resolution ("720p" or "1080p")
 
         Returns:
             HiggsFieldResponse with request_id
         """
         logger.info(f"Higgsfield image gen: '{prompt[:50]}...' model={model}")
+
+        # Higgsfield only accepts "720p" or "1080p"
+        valid_resolutions = ["720p", "1080p"]
+        if resolution not in valid_resolutions:
+            resolution = "1080p"
 
         payload = {
             "prompt": prompt,
@@ -320,7 +325,7 @@ class HiggsFieldClient:
         prompt: str,
         model: str = HiggsFieldImageModel.SOUL_STANDARD,
         aspect_ratio: str = "1:1",
-        resolution: str = "1024",
+        resolution: str = "1080p",
         poll_interval: float = 2.0,
         max_wait: float = 120.0
     ) -> HiggsFieldResponse:

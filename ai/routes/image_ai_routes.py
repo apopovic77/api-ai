@@ -106,8 +106,8 @@ async def generate_with_higgsfield(
 
     client = get_client()
 
-    # Map aspect ratio to resolution
-    resolution = "1024"  # Default
+    # Higgsfield only accepts "720p" or "1080p"
+    resolution = "1080p"
 
     logger.info(f"Higgsfield image gen: model={model}, aspect={aspect_ratio}")
 
