@@ -22,8 +22,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
 
-# Import routes (will be created)
-from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes
+# Import routes
+from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes
 
 # Setup logging
 logging.basicConfig(
@@ -53,6 +53,7 @@ app.add_middleware(
 # Include routers
 app.include_router(text_ai_routes.router, prefix="/ai", tags=["Text AI"])
 app.include_router(image_ai_routes.router, prefix="/ai", tags=["Image AI"])
+app.include_router(video_ai_routes.router, prefix="/ai", tags=["Video AI"])
 app.include_router(audio_ai_routes.router, prefix="/ai", tags=["Audio AI"])
 app.include_router(dialog_routes.router, prefix="/ai/dialog", tags=["Dialog System"])
 
@@ -71,26 +72,34 @@ def root():
     """Root endpoint with API info"""
     return {
         "service": "Arkturian AI API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "docs": "/docs",
         "health": "/health",
         "endpoints": {
             "text_ai": [
                 "POST /ai/claude",
-                "POST /ai/chatgpt", 
-                "POST /ai/gemini"
+                "POST /ai/chatgpt",
+                "POST /ai/gemini",
+                "POST /ai/gemini/vision"
             ],
             "image_ai": [
-                "POST /ai/genimage",
+                "POST /ai/genimage (Higgsfield default)",
+                "GET /ai/genimage/models",
                 "POST /ai/upscale",
                 "POST /ai/gendepth"
+            ],
+            "video_ai": [
+                "POST /ai/genvideo (Image-to-Video)",
+                "GET /ai/genvideo/status/{request_id}",
+                "POST /ai/genvideo/cancel/{request_id}",
+                "GET /ai/genvideo/models"
             ],
             "audio_ai": [
                 "POST /ai/generate_speech",
                 "POST /ai/gensfx",
                 "POST /ai/genmusic",
                 "POST /ai/genmusic_eleven",
-                "POST /ai/transcribe (Whisper + Gemini)"
+                "POST /ai/transcribe"
             ],
             "dialog": [
                 "POST /ai/dialog/start",
