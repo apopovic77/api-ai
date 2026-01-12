@@ -146,39 +146,16 @@ async def claude_endpoint(
             # IMPORTANT: Remove ANTHROPIC_API_KEY so Claude CLI uses OAuth credentials
             env.pop("ANTHROPIC_API_KEY", None)
 
-            # If running as root with images, use su to run as non-root user (allows permission bypass)
-            if running_as_root and image_paths:
-                # Build the claude command with proper escaping
-                claude_args = [
-                    "claude", "-p", shlex.quote(prompt_text),
-                    "--output-format", "json",
-                    "--permission-mode", "bypassPermissions",
-                    "--model", selected_model
-                ]
-                if prompt.system:
-                    claude_args.extend(["--system-prompt", shlex.quote(prompt.system)])
-
-                claude_cmd = " ".join(claude_args)
-                full_cmd = ["su", "-", cli_user, "-c", claude_cmd]
-
-                logger.info(f"Running claude as {cli_user} with permission bypass")
-                result = subprocess.run(
-                    full_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                    cwd="/"
-                )
-            else:
-                # Run directly (non-root or no images)
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                    env=env,
-                    cwd="/"
-                )
+            # Run claude directly - root has access to all files, no permission bypass needed
+            # The key is setting HOME to a non-root user's home so Claude credentials work
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env,
+                cwd="/"
+            )
             return result
 
         result = await asyncio.to_thread(run_claude_cli)
