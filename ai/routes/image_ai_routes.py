@@ -199,12 +199,22 @@ async def generate_with_gemini(
     image_bytes = None
     for part in response.candidates[0].content.parts:
         if part.inline_data is not None:
+            import base64
             raw_data = part.inline_data.data
-            # Handle both raw bytes and base64-encoded strings
+
+            # Handle various encodings from Gemini API
             if isinstance(raw_data, str):
-                import base64
+                # String: decode from base64
                 image_bytes = base64.b64decode(raw_data)
-                logger.info("Decoded base64 image data from Gemini")
+                logger.info("Decoded base64 string from Gemini")
+            elif isinstance(raw_data, bytes):
+                # Check if bytes are base64-encoded (starts with common image headers in base64)
+                # JPEG base64 starts with /9j/, PNG with iVBO
+                if raw_data[:4] in (b'/9j/', b'iVBO', b'/9j/'):
+                    image_bytes = base64.b64decode(raw_data)
+                    logger.info("Decoded base64 bytes from Gemini")
+                else:
+                    image_bytes = raw_data
             else:
                 image_bytes = raw_data
             break
