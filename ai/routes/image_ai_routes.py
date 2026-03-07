@@ -23,10 +23,11 @@ class ImageGenRequest(BaseModel):
     negative_prompt: Optional[str] = None
     width: Optional[int] = 1024
     height: Optional[int] = 1024
-    aspect_ratio: Optional[str] = Field(default="1:1", description="Aspect ratio (1:1, 16:9, 9:16)")
+    aspect_ratio: Optional[str] = Field(default="1:1", description="Aspect ratio (1:1, 16:9, 9:16, 1:4, 4:1, 1:8, 8:1)")
+    image_size: Optional[str] = Field(default=None, description="Resolution: 1K, 2K, 4K (Nano Banana 2 only)")
     model: Optional[str] = Field(
-        default="nano-banana",
-        description="Model: nano-banana (default), higgsfield, higgsfield-reve, imagen-4"
+        default="nano-banana-2",
+        description="Model: nano-banana-2 (default), nano-banana-pro, imagen-4, higgsfield, higgsfield-reve"
     )
     collection_id: Optional[str] = Field(default="ai-generated-images", description="Storage collection")
     link_id: Optional[str] = Field(default=None, description="Link ID for related objects")
@@ -57,17 +58,18 @@ def get_api_key():
 
 # Model mapping: user-friendly names to provider-specific IDs
 MODEL_MAPPING = {
-    # Higgsfield Models (NEW DEFAULT)
+    # Higgsfield Models
     "higgsfield": "higgsfield-ai/soul/standard",
     "higgsfield-soul": "higgsfield-ai/soul/standard",
     "higgsfield-reve": "reve/text-to-image",
     "reve": "reve/text-to-image",
 
-    # Gemini Image Models (Legacy)
-    "nano-banana": "gemini-2.5-flash-image",
+    # Gemini Image Models
+    "nano-banana-2": "gemini-3.1-flash-image-preview",
+    "nano-banana": "gemini-3.1-flash-image-preview",  # alias -> Nano Banana 2
     "nano-banana-pro": "gemini-3-pro-image-preview",
-    "gemini": "gemini-2.5-flash-image",
-    "gemini-2.5-flash-image": "gemini-2.5-flash-image",
+    "gemini": "gemini-3.1-flash-image-preview",
+    "gemini-3.1-flash-image-preview": "gemini-3.1-flash-image-preview",
     "gemini-3-pro-image-preview": "gemini-3-pro-image-preview",
 
     # Imagen 4
@@ -164,7 +166,9 @@ async def generate_with_gemini(
     prompt: str,
     model: str,
     collection_id: str,
-    link_id: Optional[str]
+    link_id: Optional[str],
+    aspect_ratio: Optional[str] = None,
+    image_size: Optional[str] = None
 ) -> dict:
     """Generate image using Google Gemini/Imagen API"""
     from google import genai
@@ -182,16 +186,27 @@ async def generate_with_gemini(
             detail=f"Monthly Gemini API budget exceeded: {status['total_cost_eur']:.2f}/{status['monthly_budget_eur']:.2f} EUR."
         )
 
-    logger.info(f"Gemini image gen: model={model}")
+    logger.info(f"Gemini image gen: model={model}, aspect_ratio={aspect_ratio}, image_size={image_size}")
 
     # Use Google GenAI SDK
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+    # Build image config for Nano Banana 2 features
+    image_config = None
+    if aspect_ratio or image_size:
+        config_kwargs = {}
+        if aspect_ratio:
+            config_kwargs["aspect_ratio"] = aspect_ratio
+        if image_size:
+            config_kwargs["image_size"] = image_size
+        image_config = types.ImageConfig(**config_kwargs)
 
     response = client.models.generate_content(
         model=model,
         contents=prompt,
         config=types.GenerateContentConfig(
-            response_modalities=["IMAGE"]
+            response_modalities=["TEXT", "IMAGE"],
+            image_config=image_config
         )
     )
 
@@ -256,10 +271,10 @@ async def generate_image_endpoint(
     """
     Generate an image from text prompt using various AI models.
 
-    **Default: nano-banana (Gemini)** - fast, free
+    **Default: nano-banana-2 (Gemini 3.1 Flash Image)** - fast, free, up to 4K
 
     Supported models:
-    - **nano-banana** (default): Gemini 2.5 Flash Image - fast, free
+    - **nano-banana-2** (default): Gemini 3.1 Flash Image - fast, free, up to 4K
     - **nano-banana-pro**: Gemini 3 Pro Image - best Gemini quality
     - **imagen-4**: Google Imagen 4.0 - photorealistic
     - **higgsfield**: Higgsfield Soul - high quality (requires credits)
@@ -269,8 +284,9 @@ async def generate_image_endpoint(
     ```json
     {
         "prompt": "A serene mountain landscape at sunset",
-        "model": "nano-banana",
-        "aspect_ratio": "16:9"
+        "model": "nano-banana-2",
+        "aspect_ratio": "16:9",
+        "image_size": "2K"
     }
     ```
     """
@@ -296,7 +312,9 @@ async def generate_image_endpoint(
                 prompt=request.prompt,
                 model=actual_model,
                 collection_id=request.collection_id or "ai-generated-images",
-                link_id=request.link_id
+                link_id=request.link_id,
+                aspect_ratio=request.aspect_ratio,
+                image_size=request.image_size
             )
 
         elif model_name == "dall-e-3":
@@ -334,10 +352,10 @@ async def list_image_models():
     return {
         "models": [
             {
-                "id": "nano-banana",
-                "name": "Nano Banana",
+                "id": "nano-banana-2",
+                "name": "Nano Banana 2",
                 "provider": "Google Gemini",
-                "description": "Fast, free image generation (default)",
+                "description": "Gemini 3.1 Flash Image - fast, free, up to 4K, character consistency (default)",
                 "default": True
             },
             {

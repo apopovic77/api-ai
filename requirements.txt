@@ -12,7 +12,7 @@ aiofiles==23.2.1
 # AI Services - Text
 anthropic==0.7.7          # Claude AI
 openai>=2.0.0             # ChatGPT, DALL-E, TTS (2.x required for httpx 0.28+ compatibility)
-google-genai>=0.4.0       # Google GenAI SDK for image generation
+google-genai>=1.51.0      # Google GenAI SDK for image generation (Nano Banana 2)
 google-generativeai>=0.8.0  # Google Gemini API for audio transcription
 
 # AI Services - Image
