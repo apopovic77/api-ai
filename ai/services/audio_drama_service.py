@@ -729,13 +729,22 @@ class AudioDramaGenerator(SpeechGenerator):
                     voice = self._pick_distinct_voice(gender)
                 self._speaker_assigned_voice[speaker] = voice
         
-        config = OpenAITTSConfig(voice=voice, speed=self.request.content.speed, output_format=self.request.config.output_format)
-        audio_bytes = await tts_service.generate_openai_tts(text, config)
-        
+        # Use provider from request config
+        provider = self.request.config.provider
+        if provider == "elevenlabs":
+            from ai.services.tts_models import ElevenLabsTTSConfig
+            el_config = self.request.config.elevenlabs or ElevenLabsTTSConfig()
+            # Use voice_id from original request, not from Gemini voice mapping
+            el_config.voice_id = self.request.content.voice
+            audio_bytes = await tts_service.generate_elevenlabs_tts(text, el_config)
+        else:
+            config = OpenAITTSConfig(voice=voice, speed=self.request.content.speed, output_format=self.request.config.output_format)
+            audio_bytes = await tts_service.generate_openai_tts(text, config)
+
         chunk_path = self.temp_dir / f"dialog_{uuid.uuid4()}.{self.request.config.output_format}"
         chunk_path.write_bytes(audio_bytes)
         # annotate selected voice for UI purposes
-        segment['chosen_voice'] = voice
+        segment['chosen_voice'] = self.request.content.voice if provider == "elevenlabs" else voice
         return chunk_path
 
     async def _source_single_sfx(self, cue):
