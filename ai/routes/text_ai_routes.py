@@ -317,8 +317,13 @@ async def chatgpt_endpoint(
         logger.info(f"Calling codex exec with prompt length: {len(prompt_text)} chars")
 
         # Build CLI command
-        # codex exec --json --skip-git-repo-check "prompt"
-        cmd = ["codex", "exec", "--json", "--skip-git-repo-check"]
+        # --dangerously-bypass-approvals-and-sandbox is the Codex
+        # equivalent of Gemini's --no-sandbox --yolo: full network +
+        # filesystem access, no confirmation prompts. Needed for the
+        # model to actually fetch URLs in the prompt instead of
+        # filename-guessing.
+        cmd = ["codex", "exec", "--json", "--skip-git-repo-check",
+               "--dangerously-bypass-approvals-and-sandbox"]
 
         # Only add model if explicitly specified by user
         # (ChatGPT subscription has limited model access, let Codex use its default)
@@ -601,8 +606,13 @@ async def gemini_endpoint(
         logger.info(f"Calling gemini CLI with prompt length: {len(prompt_text)} chars")
 
         # Build CLI command
-        # gemini --output-format json "prompt"
-        cmd = ["gemini", "--output-format", "json", prompt_text]
+        # --no-sandbox + --yolo give the CLI full network + filesystem
+        # access without per-tool-call confirmations. Required so the
+        # CLI can actually WebFetch URLs in the prompt (image judging,
+        # documentation lookup, ...) — without these flags the model
+        # falls back to filename-only heuristics.
+        cmd = ["gemini", "--output-format", "json",
+               "--no-sandbox", "--yolo", prompt_text]
 
         # Call gemini in subprocess
         def run_gemini_cli():
