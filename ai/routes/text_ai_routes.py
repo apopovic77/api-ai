@@ -229,10 +229,20 @@ async def claude_endpoint(
             usage.get("cache_read_input_tokens", 0)
         )
 
-        # Determine model used
+        # Determine model used. When system context is cached (e.g. CLAUDE.md)
+        # multiple models can appear in modelUsage — haiku for the cache layer
+        # plus the requested model for the actual inference. Pick the one that
+        # actually generated output tokens so the response shows the user-facing
+        # model, not the cache-tier helper.
         model_usage = cli_response.get("modelUsage", {})
-        models_used = list(model_usage.keys())
-        model_name = models_used[0] if models_used else "claude-cli"
+        if model_usage:
+            model_name = max(
+                model_usage.items(),
+                key=lambda kv: kv[1].get("outputTokens", 0)
+                              if isinstance(kv[1], dict) else 0
+            )[0]
+        else:
+            model_name = "claude-cli"
 
         logger.info(
             f"Claude CLI response: {len(response_text)} chars, "
@@ -623,7 +633,10 @@ async def gemini_endpoint(
         # --skip-trust bypasses the "trusted directory" prompt that
         # otherwise blocks the CLI in headless/service contexts.
         cmd = ["gemini", "--output-format", "json",
-               "--no-sandbox", "--yolo", "--skip-trust", prompt_text]
+               "--no-sandbox", "--yolo", "--skip-trust"]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.append(prompt_text)
 
         # Call gemini in subprocess
         def run_gemini_cli():
