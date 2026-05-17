@@ -109,6 +109,10 @@ async def claude_endpoint(
         logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars")
 
         # Build CLI command with default model sonnet (cost-effective)
+        # NOTE: --dangerously-skip-permissions is NOT compatible with
+        # root/sudo (the CLI refuses to start). uvicorn here runs as
+        # root, so we leave the flag off — in -p (print) mode there are
+        # no tool calls anyway, so no permission prompts to bypass.
         cmd = ["claude", "-p", prompt_text, "--output-format", "json"]
 
         # Add model - default to sonnet (günstig), user can override with opus/haiku
@@ -141,7 +145,12 @@ async def claude_endpoint(
             # Build environment
             env = os.environ.copy()
             env["NO_COLOR"] = "1"
-            env["HOME"] = cli_home
+            # Honor HOME + CLAUDE_CONFIG_DIR from the systemd unit if set;
+            # only fall back to cli_home when nothing was provided. The
+            # canonical credential lookup path is $CLAUDE_CONFIG_DIR/.credentials.json
+            # — on arkserver the drop-in points this at a cloud-api bot
+            # home so the auto-login + refresh loop manages the OAuth token.
+            env.setdefault("HOME", cli_home)
 
             # IMPORTANT: Remove ANTHROPIC_API_KEY so Claude CLI uses OAuth credentials
             env.pop("ANTHROPIC_API_KEY", None)
@@ -611,8 +620,10 @@ async def gemini_endpoint(
         # CLI can actually WebFetch URLs in the prompt (image judging,
         # documentation lookup, ...) — without these flags the model
         # falls back to filename-only heuristics.
+        # --skip-trust bypasses the "trusted directory" prompt that
+        # otherwise blocks the CLI in headless/service contexts.
         cmd = ["gemini", "--output-format", "json",
-               "--no-sandbox", "--yolo", prompt_text]
+               "--no-sandbox", "--yolo", "--skip-trust", prompt_text]
 
         # Call gemini in subprocess
         def run_gemini_cli():
