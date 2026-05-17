@@ -129,8 +129,21 @@ jobs:
             echo "🔄 Restarting API service..."
             systemctl restart api-ai || echo "⚠️  Service restart may need manual intervention"
 
-            sleep 3
-            curl -fsS --max-time 10 http://127.0.0.1:8000/health
+            # Robust health check: uvicorn workers take a few seconds to bind
+            # after restart. Poll for up to ~30s before giving up.
+            echo "🩺 Waiting for /health to come back up..."
+            for i in $(seq 1 15); do
+              if curl -fsS --max-time 5 http://127.0.0.1:8000/health > /dev/null 2>&1; then
+                echo "✅ Healthy after ${i} attempt(s)"
+                break
+              fi
+              if [ "$i" -eq 15 ]; then
+                echo "❌ Service did not come up within 30s"
+                systemctl status api-ai --no-pager | tail -20 || true
+                exit 1
+              fi
+              sleep 2
+            done
 
             echo "✅ Deployment completed successfully!"
 
@@ -275,16 +288,23 @@ jobs:
             sudo ln -sf /etc/nginx/sites-available/${DOMAIN} /etc/nginx/sites-enabled/${DOMAIN}
             sudo nginx -t && sudo systemctl reload nginx
 
-            # Restart and verify
+            # Restart and verify with retry — uvicorn workers need a few
+            # seconds to bind after restart.
             sudo systemctl restart ${SERVICE_NAME}
-            sleep 5
-
-            if curl -sf http://localhost:${UPSTREAM_PORT}/health > /dev/null; then
-              echo "✅ AI API healthy on pdrei (local)"
-              curl -s http://localhost:${UPSTREAM_PORT}/health
-              echo
-            else
-              echo "⚠️ Local health check failed"
+            echo "🩺 Waiting for /health to come back up..."
+            healthy=false
+            for i in $(seq 1 15); do
+              if curl -sf --max-time 5 http://localhost:${UPSTREAM_PORT}/health > /dev/null 2>&1; then
+                echo "✅ Healthy after ${i} attempt(s)"
+                curl -s http://localhost:${UPSTREAM_PORT}/health
+                echo
+                healthy=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$healthy" != "true" ]; then
+              echo "⚠️ Local health check failed after 30s"
               sudo systemctl status ${SERVICE_NAME} --no-pager
               sudo journalctl -u ${SERVICE_NAME} -n 50 --no-pager
               exit 1
@@ -346,11 +366,22 @@ jobs:
 
             echo "=== Restarting service ==="
             sudo systemctl restart api-ai.service
-            sleep 3
 
-            echo "=== Health check ==="
-            curl -fsS --max-time 10 http://127.0.0.1:8003/health
-            echo ""
+            echo "=== Health check (with retry) ==="
+            for i in $(seq 1 15); do
+              if curl -fsS --max-time 5 http://127.0.0.1:8003/health > /dev/null 2>&1; then
+                echo "✅ Healthy after ${i} attempt(s)"
+                curl -s http://127.0.0.1:8003/health
+                echo
+                break
+              fi
+              if [ "$i" -eq 15 ]; then
+                echo "❌ Service did not come up within 30s"
+                sudo systemctl status api-ai.service --no-pager | tail -20 || true
+                exit 1
+              fi
+              sleep 2
+            done
             echo "=== Deployment complete ==="
             DEPLOY_SCRIPT
 
