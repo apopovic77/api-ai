@@ -252,14 +252,47 @@ async def generate_with_gemini(
 
     logger.info(f"Saved Gemini image to storage: ID={saved_obj.id}")
 
+    # The storage-api's upload response does not populate file_url with the
+    # checksum-versioned URL; only a follow-up GET on the asset returns it.
+    # Refetch so the response carries a usable URL clients can hit directly
+    # instead of always having to round-trip via assets_get.
+    from ai.clients.storage_client import get_storage_object
+    file_url = saved_obj.file_url
+    width = None
+    height = None
+    try:
+        full_obj = await get_storage_object(saved_obj.id)
+        if full_obj.file_url:
+            file_url = full_obj.file_url
+        # Real generated dimensions live on the storage record; the request
+        # body's width/height are user hints and may not match (Gemini picks
+        # output size from aspect_ratio + image_size).
+        width = getattr(full_obj, "width", None)
+        height = getattr(full_obj, "height", None)
+    except Exception as e:
+        logger.warning(f"Could not refetch storage object {saved_obj.id} for full URL/dims: {e}")
+
+    # Fallback for width/height if storage didn't return them — read from
+    # the in-memory bytes via PIL (zero extra IO).
+    if not width or not height:
+        try:
+            from PIL import Image
+            from io import BytesIO
+            with Image.open(BytesIO(image_bytes)) as im:
+                width, height = im.size
+        except Exception as e:
+            logger.warning(f"PIL fallback for dims failed: {e}")
+
     # Track cost
     cost_tracker.track_image_generation(model, num_images=1)
 
     return {
         "id": saved_obj.id,
-        "image_url": saved_obj.file_url,
-        "file_url": saved_obj.file_url,
-        "storage_object_id": saved_obj.id
+        "image_url": file_url,
+        "file_url": file_url,
+        "storage_object_id": saved_obj.id,
+        "width": width,
+        "height": height,
     }
 
 
@@ -323,12 +356,14 @@ async def generate_image_endpoint(
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported model: {model_name}")
 
+        # Don't echo request.width/height — the actual model picks output
+        # dimensions from aspect_ratio + image_size, so request.width is just
+        # a default placeholder (1024) that would lie about reality. The
+        # provider handler puts real dims into `result`; preserve those.
         return {
             **result,
             "model": model_name,
             "actual_model": actual_model,
-            "width": request.width,
-            "height": request.height
         }
 
     except HTTPException:
