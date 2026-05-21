@@ -407,6 +407,7 @@ async def chatgpt_endpoint(
         input_tokens = 0
         output_tokens = 0
         model_name = selected_model or "codex-default"  # Track as codex-default if no model specified
+        upstream_error: Optional[str] = None  # captured if Codex emits a turn.failed
 
         for line in raw_output.split('\n'):
             if not line.strip():
@@ -426,10 +427,46 @@ async def chatgpt_endpoint(
                     input_tokens = usage.get("input_tokens", 0)
                     output_tokens = usage.get("output_tokens", 0)
 
+                # Capture upstream error so we can return a useful message
+                # instead of an opaque 500. Codex emits either a top-level
+                # {"type":"error",...} or a {"type":"turn.failed","error":{...}}.
+                if event.get("type") in ("error", "turn.failed"):
+                    err_payload = event.get("error") if event.get("type") == "turn.failed" else event
+                    err_msg = err_payload.get("message") if isinstance(err_payload, dict) else None
+                    if err_msg:
+                        upstream_error = err_msg
+
             except json_module.JSONDecodeError:
                 continue
 
         if not response_text:
+            # Classify the upstream error so the caller gets an actionable 4xx
+            # instead of an opaque 500. The "X model is not supported when using
+            # Codex with a ChatGPT account" message is by far the most common —
+            # the ChatGPT subscription path locks Codex to its built-in default
+            # model and rejects any --model override. Tell the caller exactly
+            # that so the frontend can stop sending the model param.
+            if upstream_error and "not supported when using Codex with a ChatGPT account" in upstream_error:
+                logger.warning(
+                    f"Codex rejected model={model_name!r} (ChatGPT subscription "
+                    f"does not allow model selection). Suggesting caller drop "
+                    f"the model param."
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Codex CLI (ChatGPT subscription) does not support model "
+                        f"selection. Requested model={model_name!r} was rejected. "
+                        f"Omit the 'model' query parameter to use the subscription "
+                        f"default (codex-default)."
+                    ),
+                )
+            if upstream_error:
+                logger.error(f"Codex upstream error: {upstream_error}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Codex CLI upstream error: {upstream_error}",
+                )
             logger.error(f"No agent_message found in Codex output: {raw_output[:500]}")
             raise HTTPException(status_code=500, detail="No response from Codex CLI")
 
